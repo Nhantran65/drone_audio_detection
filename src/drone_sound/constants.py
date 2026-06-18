@@ -10,6 +10,28 @@ ALLOWED_LABELS = frozenset({"drone", "no_drone", "ignore"})
 
 ALLOWED_SPLITS = frozenset({"train", "val", "public_test", "professor_test"})
 
+ALLOWED_DATASET_ROLES = frozenset(
+    {
+        "positive_drone",
+        "positive_optional",
+        "negative_aircraft",
+        "negative_traffic",
+        "negative_urban_industrial",
+        "negative_speech",
+        "professor_positive_test",
+    }
+)
+
+ALLOWED_LICENSE_STATUSES = frozenset(
+    {
+        "commercial_ok",
+        "research_only",
+        "non_commercial",
+        "license_unspecified",
+        "permission_required",
+    }
+)
+
 ALLOWED_SUBTYPES = frozenset(
     {
         "drone_field",

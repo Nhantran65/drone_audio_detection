@@ -20,6 +20,7 @@ implemented until tests or validation evidence exist.
 | Story | Contract | Unit | Integration | E2E | Platform | Status | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | US-001 | POC contract and professor data scaffold | yes | yes | no | no | implemented | `python -m pytest`; professor audit generated 1113 windows with redacted GPS |
+| US-002 | Public dataset registry and license audit | yes | yes | no | no | implemented | `python -m pytest`; registry validates 6 public sources and exports license manifest |
 
 ## Evidence Rules
 

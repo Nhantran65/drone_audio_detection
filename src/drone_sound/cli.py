@@ -5,6 +5,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from drone_sound.dataset_registry import (
+    export_license_manifest,
+    load_dataset_registry,
+    validate_dataset_registry,
+)
 from drone_sound.professor_data import audit_professor_zip
 
 
@@ -30,6 +35,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output redacted JSON audit report path.",
     )
 
+    registry_parser = subcommands.add_parser(
+        "validate-dataset-registry",
+        help="Validate dataset source and license registry JSON.",
+    )
+    registry_parser.add_argument(
+        "--registry",
+        required=True,
+        type=Path,
+        help="Dataset registry JSON path.",
+    )
+
+    license_parser = subcommands.add_parser(
+        "export-license-manifest",
+        help="Export a license manifest CSV from dataset registry JSON.",
+    )
+    license_parser.add_argument(
+        "--registry",
+        required=True,
+        type=Path,
+        help="Dataset registry JSON path.",
+    )
+    license_parser.add_argument(
+        "--out",
+        required=True,
+        type=Path,
+        help="Output license manifest CSV path.",
+    )
+
     return parser
 
 
@@ -44,6 +77,19 @@ def main(argv: list[str] | None = None) -> int:
             "audited professor data: "
             f"{manifest['rows']} windows -> {manifest['path']}"
         )
+        return 0
+
+    if args.command == "validate-dataset-registry":
+        entries = load_dataset_registry(args.registry)
+        validate_dataset_registry(entries)
+        print(f"validated dataset registry: {len(entries)} entries")
+        return 0
+
+    if args.command == "export-license-manifest":
+        entries = load_dataset_registry(args.registry)
+        validate_dataset_registry(entries)
+        export_license_manifest(entries, args.out)
+        print(f"exported license manifest: {len(entries)} entries -> {args.out}")
         return 0
 
     parser.error(f"unknown command: {args.command}")

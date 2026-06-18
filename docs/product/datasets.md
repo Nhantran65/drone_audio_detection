@@ -7,6 +7,9 @@
   resistance.
 - Professor data is reserved for `professor_test`.
 
+The initial public dataset source registry is maintained in
+`docs/product/dataset-sources.md` and `configs/datasets.json`.
+
 ## Professor Data Rule
 
 `fwdronedata.zip` is private professor-provided real-world data. It is treated
@@ -67,6 +70,14 @@ Splits:
 - `public_test`
 - `professor_test`
 
+License status:
+
+- `commercial_ok`
+- `research_only`
+- `non_commercial`
+- `license_unspecified`
+- `permission_required`
+
 Subtypes:
 
 - `drone_field`
@@ -89,3 +100,10 @@ is not allowed.
 
 Professor data audit reports must redact exact GPS coordinates by default. The
 report may state that a location is present with `location_present = true`.
+
+## License Boundary
+
+Datasets with `non_commercial`, `license_unspecified`, or
+`permission_required` status are not cleared for commercial product training.
+They may be used only in the documented research lane until permission or a
+compatible license is confirmed.

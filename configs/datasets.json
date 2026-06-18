@@ -1,0 +1,88 @@
+{
+  "datasets": [
+    {
+      "dataset_id": "dronenoise_database",
+      "name": "DroneNoise Database",
+      "role": "positive_drone",
+      "source_url": "https://salford.figshare.com/articles/dataset/DroneNoise_Database/22133411",
+      "doi": "10.17866/rd.salford.22133411",
+      "license": "CC BY 4.0",
+      "license_status": "commercial_ok",
+      "label_binary": "drone",
+      "label_subtype": ["drone_field"],
+      "training_use": "training_allowed_with_attribution",
+      "evaluation_use": "public_positive_test_allowed",
+      "notes": "Field-recorded small UAS/drone noise dataset; primary positive source."
+    },
+    {
+      "dataset_id": "kielce_uav_acoustic_signals",
+      "name": "Dataset of acoustic signals of unmanned aerial vehicles and speech obtained in external environmental conditions",
+      "role": "positive_drone",
+      "source_url": "https://zenodo.org/records/15190811",
+      "doi": "10.5281/zenodo.15190811",
+      "license": "CC BY 4.0",
+      "license_status": "commercial_ok",
+      "label_binary": "drone",
+      "label_subtype": ["drone_field", "drone_with_speech"],
+      "training_use": "training_allowed_with_attribution",
+      "evaluation_use": "public_positive_test_allowed",
+      "notes": "Contains acoustic signals recorded in the presence of UAVs and speech in the presence of UAVs; tag speech-present clips as drone_with_speech."
+    },
+    {
+      "dataset_id": "nasa_small_uas_flyover",
+      "name": "NASA Small UAS Flyover Acoustics Data",
+      "role": "positive_optional",
+      "source_url": "https://data.nasa.gov/dataset/small-uas-flyover-acoustics-data",
+      "doi": "",
+      "license": "License not specified",
+      "license_status": "license_unspecified",
+      "label_binary": "drone",
+      "label_subtype": ["drone_field"],
+      "training_use": "exclude_from_training_until_license_clarified",
+      "evaluation_use": "research_evaluation_only_until_license_clarified",
+      "notes": "NASA portal currently reports license not specified; do not use for training until license is clarified."
+    },
+    {
+      "dataset_id": "aerosonicdb_ypad_0523",
+      "name": "AeroSonicDB (YPAD-0523)",
+      "role": "negative_aircraft",
+      "source_url": "https://zenodo.org/records/8368882",
+      "doi": "10.5281/zenodo.8368882",
+      "license": "CC BY-NC 4.0",
+      "license_status": "non_commercial",
+      "label_binary": "no_drone",
+      "label_subtype": ["no_drone_aircraft"],
+      "training_use": "research_training_only_non_commercial",
+      "evaluation_use": "hard_negative_public_test_allowed_for_research",
+      "notes": "Use as hard negative for low-flying aircraft; page has conflicting license signals, so treat conservatively as CC BY-NC 4.0."
+    },
+    {
+      "dataset_id": "idmt_traffic",
+      "name": "IDMT-TRAFFIC",
+      "role": "negative_traffic",
+      "source_url": "https://www.idmt.fraunhofer.de/en/publications/datasets/traffic.html",
+      "doi": "10.5281/zenodo.7551553",
+      "license": "CC BY-NC-ND 4.0",
+      "license_status": "non_commercial",
+      "label_binary": "no_drone",
+      "label_subtype": ["no_drone_traffic", "no_drone_background"],
+      "training_use": "research_training_review_required_due_to_no_derivatives",
+      "evaluation_use": "hard_negative_public_test_allowed_for_research",
+      "notes": "Traffic and roadside background sounds; no-derivatives clause requires review before preprocessing-derived redistribution or product training."
+    },
+    {
+      "dataset_id": "urbansound8k",
+      "name": "UrbanSound8K",
+      "role": "negative_urban_industrial",
+      "source_url": "https://urbansounddataset.weebly.com/urbansound8k.html",
+      "doi": "10.5281/zenodo.1203745",
+      "license": "CC BY-NC 3.0",
+      "license_status": "non_commercial",
+      "label_binary": "no_drone",
+      "label_subtype": ["no_drone_urban_industrial"],
+      "training_use": "research_training_only_non_commercial",
+      "evaluation_use": "hard_negative_public_test_allowed_for_research",
+      "notes": "Use selected mechanical/urban classes such as air_conditioner, drilling, engine_idling, jackhammer, siren, car_horn, and street_music."
+    }
+  ]
+}
