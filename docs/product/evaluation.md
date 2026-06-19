@@ -29,6 +29,10 @@ Report false positive rate by negative subtype:
 - `no_drone_speech`
 - `no_drone_background`
 
+V1 may omit `no_drone_speech` if no speech-only negative source has been
+selected yet. In that case the metrics report must state that speech-only
+false-positive coverage is unavailable rather than treating it as zero.
+
 ## Professor Test Evaluation
 
 Professor data is evaluated only after the model and threshold are frozen.
@@ -49,3 +53,6 @@ accuracy, or precision unless real-world no-drone professor data is added.
 
 Thresholds must be selected with validation data only. Professor data must not
 be used for threshold selection.
+
+For v1, `public_test` is a fixed split produced by the public manifest builder.
+It must not be used for threshold selection or k-fold training.

@@ -107,3 +107,15 @@ Datasets with `non_commercial`, `license_unspecified`, or
 `permission_required` status are not cleared for commercial product training.
 They may be used only in the documented research lane until permission or a
 compatible license is confirmed.
+
+## V1 Training Boundary
+
+The first training smoke baseline may proceed before a speech-only negative
+dataset is selected. Any v1 report must mark `no_drone_speech` coverage as not
+available and must avoid broad false-positive claims for speech-heavy
+environments until that dataset gap is closed.
+
+For v1 research only, the public manifest builder includes every dataset in
+`configs/datasets.json` regardless of `license_status`. License metadata remains
+in audit output and manifest notes, and this does not clear any source for
+product or commercial training.

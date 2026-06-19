@@ -28,9 +28,23 @@ For each window row:
 - `window_end_sec` is `window_start_sec + 1.0`.
 - `window_id` is unique and deterministic.
 
+The US-004 public manifest builder audits local raw WAV files and does not
+write processed audio copies. Until a preprocessing story adds resampling,
+`sample_rate_processed` mirrors the audited source sample rate and sample-rate
+or channel mismatches are visible in the audit JSON.
+
 ## Feature Extraction
 
-Feature extraction is planned but not implemented in Milestone 1.
+Milestone 1 did not implement feature extraction.
+
+The v1 training smoke baseline extracts simple dependency-free WAV window
+features directly from manifest rows:
+
+- mean amplitude
+- mean absolute amplitude
+- RMS amplitude
+- peak absolute amplitude
+- zero-crossing rate
 
 Default feature plan:
 

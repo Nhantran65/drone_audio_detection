@@ -3,6 +3,10 @@
 This document records the initial public dataset registry for the drone audio
 POC. The executable source of truth is `configs/datasets.json`.
 
+V1 research manifest creation includes all registered datasets to get the first
+training feedback loop running. License status is still tracked here and in the
+audit output, but it does not block v1 research manifest creation.
+
 ## License Status Vocabulary
 
 - `commercial_ok`: license appears compatible with commercial reuse when
@@ -32,8 +36,10 @@ This is project risk tracking, not legal advice.
 
 ## Open Items
 
-- Select a speech-only negative dataset.
-- Clarify NASA training license before inclusion in train or validation splits.
+- Select a speech-only negative dataset after the v1 training smoke baseline.
+  V1 may proceed without this source, but reports must state that
+  `no_drone_speech` false-positive coverage is unavailable.
+- Clarify NASA training license before product or commercial training claims.
 - Decide whether IDMT-TRAFFIC may be used for transformed training features or
-  only for research/evaluation artifacts.
+  only for research/evaluation artifacts beyond v1 local experiments.
 - Resolve AeroSonicDB license conflict before productization.

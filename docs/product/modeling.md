@@ -12,6 +12,9 @@ No ML framework dependency is installed in Milestone 1.
 
 Planned baselines:
 
+- V1 smoke baseline: dependency-free centroid classifier over simple WAV window
+  features, used only to prove the training/evaluation loop before heavier ML
+  dependencies are added.
 - Classical MFCC baseline with Logistic Regression, Linear SVM, or Random
   Forest.
 - Tiny depthwise-separable CNN over log-mel spectrograms.

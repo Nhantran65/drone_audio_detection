@@ -33,3 +33,29 @@ and does not extract raw audio into the repository.
 ```bash
 python -m pytest
 ```
+
+## V1 Training Smoke Baseline
+
+Build the local public manifest from raw WAV folders first. V1 research uses
+all datasets registered in `configs/datasets.json`; license metadata is kept in
+the audit output but does not block the v1 experiment.
+
+```bash
+python -m drone_sound.cli build-public-manifest \
+  --registry configs/datasets.json \
+  --raw-root data/raw/public \
+  --manifest-out data/manifests/public_manifest.csv \
+  --audit-out artifacts/audits/public_data_audit.json \
+  --split-seed 20260619
+```
+
+Then train the smoke baseline. Professor data is evaluation-only and is
+rejected for training.
+
+```bash
+python -m drone_sound.cli train-v1 \
+  --manifest data/manifests/public_manifest.csv \
+  --audio-root data/raw/public \
+  --model-out artifacts/models/v1_baseline_model.json \
+  --metrics-out artifacts/models/v1_metrics.json
+```
