@@ -15,6 +15,7 @@ from drone_sound.nasa_mat import NasaMatConversionError, convert_nasa_mat_direct
 from drone_sound.professor_data import audit_professor_zip
 from drone_sound.public_data import PublicDatasetError, build_public_manifest
 from drone_sound.training import TrainingDataError, train_v1_baseline
+from drone_sound.v1_evaluation import V1EvaluationError, evaluate_frozen_v1_model
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +95,47 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
         help="Output JSON metrics report path.",
+    )
+
+    eval_parser = subcommands.add_parser(
+        "eval-v1",
+        help="Evaluate a frozen V1 model on public_test and professor_test data.",
+    )
+    eval_parser.add_argument(
+        "--model",
+        required=True,
+        type=Path,
+        help="Frozen V1 model JSON path.",
+    )
+    eval_parser.add_argument(
+        "--public-manifest",
+        required=True,
+        type=Path,
+        help="Public manifest CSV containing public_test rows.",
+    )
+    eval_parser.add_argument(
+        "--public-audio-root",
+        required=True,
+        type=Path,
+        help="Directory used to resolve public manifest original_file paths.",
+    )
+    eval_parser.add_argument(
+        "--professor-manifest",
+        required=True,
+        type=Path,
+        help="Professor manifest CSV containing professor_test rows.",
+    )
+    eval_parser.add_argument(
+        "--professor-audio-root",
+        required=True,
+        type=Path,
+        help="Directory containing extracted professor WAV files.",
+    )
+    eval_parser.add_argument(
+        "--metrics-out",
+        required=True,
+        type=Path,
+        help="Output JSON evaluation metrics report path.",
     )
 
     public_manifest_parser = subcommands.add_parser(
@@ -205,6 +247,28 @@ def main(argv: list[str] | None = None) -> int:
             "trained v1 baseline: "
             f"val_f2={val_metrics['f2']:.6f} "
             f"threshold={report['threshold']:.6f} -> {args.model_out}"
+        )
+        return 0
+
+    if args.command == "eval-v1":
+        try:
+            report = evaluate_frozen_v1_model(
+                args.model,
+                args.public_manifest,
+                args.public_audio_root,
+                args.professor_manifest,
+                args.professor_audio_root,
+                args.metrics_out,
+            )
+        except V1EvaluationError as error:
+            print(f"v1 evaluation error: {error}", file=sys.stderr)
+            return 1
+        public_f2 = report["public_test"]["metrics"]["f2"]
+        professor_recall = report["professor_test"]["metrics"]["recall"]
+        print(
+            "evaluated frozen v1 model: "
+            f"public_test_f2={public_f2:.6f} "
+            f"professor_recall={professor_recall:.6f} -> {args.metrics_out}"
         )
         return 0
 

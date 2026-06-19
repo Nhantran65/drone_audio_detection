@@ -56,3 +56,22 @@ be used for threshold selection.
 
 For v1, `public_test` is a fixed split produced by the public manifest builder.
 It must not be used for threshold selection or k-fold training.
+
+## V1 Frozen Evaluation Tool
+
+`eval-v1` evaluates an already-trained V1 model without retraining or changing
+the stored threshold:
+
+```text
+python -m drone_sound.cli eval-v1 \
+  --model artifacts/models/v1_baseline_model.json \
+  --public-manifest data/manifests/public_manifest.csv \
+  --public-audio-root data/raw/public \
+  --professor-manifest data/manifests/professor_manifest.csv \
+  --professor-audio-root data/raw/private/professor_real_world \
+  --metrics-out artifacts/models/v1_eval_metrics.json
+```
+
+Professor audio may be extracted locally to `data/raw/private/` for this
+evaluation. That folder remains private ignored data and is not a training
+source.

@@ -30,6 +30,8 @@ audio window contains drone sound.
 - Public WAV manifest builder for local raw folders.
 - V1 dependency-free smoke baseline that trains from non-professor manifest
   rows and selects its threshold from validation data.
+- V1 frozen evaluation tooling for public test, professor positive test, and
+  caveated combined supplementary metrics.
 
 ## Living Contract
 

@@ -10,6 +10,7 @@ Implemented story packets currently cover:
 - `US-003`: v1 training smoke baseline.
 - `US-004`: public dataset manifest builder.
 - `US-005`: NASA MAT derived WAV conversion.
+- `US-006`: frozen V1 professor evaluation.
 
 Candidate follow-up stories are tracked in `docs/stories/backlog.md`.
 

@@ -10,5 +10,6 @@ or when a product decision needs a durable place to land.
 | --- | --- | --- |
 | Data prep | Add NASA Small UAS MAT conversion or reader support so the real local registry can build a complete public manifest | implemented as US-005 |
 | V1 run | Generate the real public manifest and train the v1 smoke baseline from local public data | candidate after US-005 |
+| V1 eval | Evaluate the frozen V1 model on public test plus professor positive-only data | implemented as US-006 |
 | Preprocessing | Add 16 kHz mono preprocessing and log-mel or MFCC feature extraction | candidate |
 | Modeling | Add the first non-smoke baseline after feature extraction, likely classical MFCC or a tiny PyTorch model | candidate |

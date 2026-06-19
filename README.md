@@ -88,3 +88,28 @@ python -m drone_sound.cli train-v1 \
 as `uv run --extra data --python 3.13 python -m drone_sound.cli convert-nasa-mat ...`.
 The same `data` extra installs `tqdm`, so `train-v1` shows per-split progress
 and ETA while extracting window features.
+
+## V1 Frozen Model Evaluation
+
+After training, evaluate the frozen model and validation-selected threshold on
+`public_test` plus professor real-world positive data. Extract professor audio
+locally first; `data/raw/private/` is ignored and must stay out of git.
+
+```bash
+mkdir -p data/raw/private/professor_real_world
+unzip -o fwdronedata.zip -d data/raw/private/professor_real_world
+```
+
+```bash
+python -m drone_sound.cli eval-v1 \
+  --model artifacts/models/v1_baseline_model.json \
+  --public-manifest data/manifests/public_manifest.csv \
+  --public-audio-root data/raw/public \
+  --professor-manifest data/manifests/professor_manifest.csv \
+  --professor-audio-root data/raw/private/professor_real_world \
+  --metrics-out artifacts/models/v1_eval_metrics.json
+```
+
+Professor metrics are recall-oriented only because the professor data is
+positive-only or near-positive-only. Combined metrics are supplementary and do
+not replace the public test benchmark.
