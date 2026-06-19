@@ -23,6 +23,14 @@ audio window contains drone sound.
 - Cloud deployment.
 - Event-level smoothing or tracking.
 
+## Implemented Tooling After Milestone 1
+
+- Professor data audit to manifest plus redacted audit JSON.
+- Public dataset registry and license manifest export.
+- Public WAV manifest builder for local raw folders.
+- V1 dependency-free smoke baseline that trains from non-professor manifest
+  rows and selects its threshold from validation data.
+
 ## Living Contract
 
 `SPEC.md` remains input material. Current project truth should be maintained in

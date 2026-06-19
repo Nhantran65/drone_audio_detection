@@ -7,6 +7,11 @@ requires-python = ">=3.13"
 dependencies = []
 
 [project.optional-dependencies]
+data = [
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "tqdm>=4.66",
+]
 dev = [
     "pytest>=8.0",
 ]

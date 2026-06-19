@@ -72,6 +72,6 @@ command `python -m pytest`.
 
 ## Evidence
 
-- `. .venv/bin/activate && PYTHONDONTWRITEBYTECODE=1 python -m pytest` -> 15 passed.
+- `uv run --no-project --with pytest --python 3.13 python -m pytest` -> 18 passed.
 - `. .venv/bin/activate && PYTHONDONTWRITEBYTECODE=1 python -m drone_sound.cli train-v1 --manifest data/manifests/professor_manifest.csv --audio-root . --model-out artifacts/models/v1_baseline_model.json --metrics-out artifacts/models/v1_metrics.json` -> cleanly rejected current repo data because it only has professor `professor_test` rows and no non-professor train rows with both labels.
-- `scripts/bin/harness-cli story verify-all` -> 3 stories verified: 3 passed, 0 failed, 0 skipped.
+- `scripts/bin/harness-cli story verify-all` cannot be re-run in this checkout until the ignored prebuilt Harness CLI binary is restored.

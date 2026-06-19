@@ -2,8 +2,9 @@
 
 This file maps product behavior to proof.
 
-No product behavior has been defined or implemented yet. Do not mark a row
-implemented until tests or validation evidence exist.
+Do not mark a row implemented until tests or validation evidence exist. The
+durable proof matrix should be queried with `scripts/bin/harness-cli query
+matrix` when the local ignored Harness CLI binary is installed.
 
 ## Status Values
 
@@ -21,6 +22,9 @@ implemented until tests or validation evidence exist.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | US-001 | POC contract and professor data scaffold | yes | yes | no | no | implemented | `python -m pytest`; professor audit generated 1113 windows with redacted GPS |
 | US-002 | Public dataset registry and license audit | yes | yes | no | no | implemented | `python -m pytest`; registry validates 6 public sources and exports license manifest |
+| US-003 | V1 training smoke baseline | yes | yes | no | no | implemented | `python -m pytest`; `train-v1` writes model/metrics and rejects professor-only training data |
+| US-004 | Public dataset manifest builder | yes | yes | no | no | implemented | `python -m pytest`; synthetic all-registry WAV manifest feeds `train-v1` |
+| US-005 | NASA MAT derived WAV conversion | yes | yes | no | no | implemented | `uv run --extra data --with pytest --python 3.13 python -m pytest`; synthetic MAT conversion feeds manifest and `train-v1` |
 
 ## Evidence Rules
 

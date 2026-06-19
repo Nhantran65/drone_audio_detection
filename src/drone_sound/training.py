@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import json
 import math
-import wave
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from drone_sound.manifest import load_manifest_csv, validate_manifest_rows
+from drone_sound.wav_audio import WavReadError, read_wav_mono, read_wav_mono_array
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - base dependency path.
+    np = None
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - optional progress dependency.
+    tqdm = None
 
 POSITIVE_LABEL = "drone"
 NEGATIVE_LABEL = "no_drone"
@@ -61,9 +72,9 @@ def train_v1_baseline(
     _require_both_labels(train_rows, TRAIN_SPLIT)
     _require_both_labels(val_rows, VAL_SPLIT)
 
-    train_examples = _load_examples(train_rows, audio_root)
-    val_examples = _load_examples(val_rows, audio_root)
-    public_test_examples = _load_examples(public_test_rows, audio_root)
+    train_examples = _load_examples(train_rows, audio_root, TRAIN_SPLIT)
+    val_examples = _load_examples(val_rows, audio_root, VAL_SPLIT)
+    public_test_examples = _load_examples(public_test_rows, audio_root, PUBLIC_TEST_SPLIT)
 
     scaler = _fit_scaler([example.features for example in train_examples])
     normalized_train = [
@@ -182,23 +193,129 @@ def _require_both_labels(rows: list[Mapping[str, str]], split: str) -> None:
         raise TrainingDataError(f"{split!r} rows are missing required labels: {joined}")
 
 
-def _load_examples(rows: Iterable[Mapping[str, str]], audio_root: Path) -> list[TrainingExample]:
-    examples = []
+def _load_examples(
+    rows: Iterable[Mapping[str, str]],
+    audio_root: Path,
+    split: str,
+) -> list[TrainingExample]:
+    rows_by_audio_path: dict[Path, list[Mapping[str, str]]] = defaultdict(list)
     for row in rows:
         audio_path = _resolve_audio_path(audio_root, str(row["original_file"]).strip())
-        features = _extract_features(
-            audio_path=audio_path,
-            start_sec=float(str(row["window_start_sec"]).strip()),
-            end_sec=float(str(row["window_end_sec"]).strip()),
+        rows_by_audio_path[audio_path].append(row)
+
+    examples = []
+    progress = _progress(
+        total=sum(len(file_rows) for file_rows in rows_by_audio_path.values()),
+        desc=f"extract {split}",
+        unit="window",
+    )
+    for audio_path, file_rows in rows_by_audio_path.items():
+        progress.set_postfix_str(
+            f"{audio_path.name[:40]} ({len(file_rows)} windows)",
+            refresh=False,
         )
-        examples.append(
-            TrainingExample(
-                row=row,
-                label=str(row["label_binary"]).strip(),
-                features=features,
-            )
-        )
+        if np is not None:
+            try:
+                samples_array, metadata = read_wav_mono_array(audio_path)
+            except WavReadError as error:
+                raise TrainingDataError(str(error)) from error
+            for row in file_rows:
+                features = _extract_features_from_array(
+                    audio_path=audio_path,
+                    samples=samples_array,
+                    sample_rate_hz=metadata.sample_rate_hz,
+                    start_sec=float(str(row["window_start_sec"]).strip()),
+                    end_sec=float(str(row["window_end_sec"]).strip()),
+                )
+                examples.append(
+                    TrainingExample(
+                        row=row,
+                        label=str(row["label_binary"]).strip(),
+                        features=features,
+                    )
+                )
+        else:
+            try:
+                samples, metadata = read_wav_mono(audio_path)
+            except WavReadError as error:
+                raise TrainingDataError(str(error)) from error
+            for row in file_rows:
+                features = _extract_features_from_samples(
+                    audio_path=audio_path,
+                    samples=samples,
+                    sample_rate_hz=metadata.sample_rate_hz,
+                    start_sec=float(str(row["window_start_sec"]).strip()),
+                    end_sec=float(str(row["window_end_sec"]).strip()),
+                )
+                examples.append(
+                    TrainingExample(
+                        row=row,
+                        label=str(row["label_binary"]).strip(),
+                        features=features,
+                    )
+                )
+        progress.update(len(file_rows))
+    progress.close()
     return examples
+
+
+def _progress(total: int, desc: str, unit: str) -> Any:
+    if tqdm is None:
+        return _NullProgress()
+    return tqdm(
+        total=total,
+        desc=desc,
+        unit=unit,
+        dynamic_ncols=True,
+        mininterval=1.0,
+        miniters=1_000,
+    )
+
+
+class _NullProgress:
+    def set_postfix_str(self, value: str, refresh: bool | None = None) -> None:
+        return None
+
+    def update(self, count: int) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _extract_features_from_array(
+    audio_path: Path,
+    samples: Any,
+    sample_rate_hz: int,
+    start_sec: float,
+    end_sec: float,
+) -> tuple[float, ...]:
+    if np is None:
+        raise TrainingDataError("numpy feature extraction requested without numpy")
+    if end_sec <= start_sec:
+        raise TrainingDataError(f"invalid window bounds for {audio_path}: {start_sec}..{end_sec}")
+
+    start_index = int(round(start_sec * sample_rate_hz))
+    sample_count = int(round((end_sec - start_sec) * sample_rate_hz))
+    end_index = start_index + sample_count
+    if start_index < 0 or end_index > len(samples):
+        raise TrainingDataError(f"manifest window exceeds audio duration: {audio_path}")
+
+    window_samples = samples[start_index:end_index]
+    if len(window_samples) == 0:
+        raise TrainingDataError(f"empty audio window: {audio_path}")
+
+    abs_samples = np.abs(window_samples)
+    signs = window_samples >= 0
+    crossings = np.count_nonzero(signs[1:] != signs[:-1]) if len(window_samples) > 1 else 0
+    zero_crossing_rate = crossings / (len(window_samples) - 1) if len(window_samples) > 1 else 0.0
+    return (
+        float(np.mean(window_samples)),
+        float(np.mean(abs_samples)),
+        float(np.sqrt(np.mean(window_samples * window_samples))),
+        float(np.max(abs_samples)),
+        float(zero_crossing_rate),
+    )
 
 
 def _resolve_audio_path(audio_root: Path, original_file: str) -> Path:
@@ -211,56 +328,45 @@ def _resolve_audio_path(audio_root: Path, original_file: str) -> Path:
 
 
 def _extract_features(audio_path: Path, start_sec: float, end_sec: float) -> tuple[float, ...]:
+    try:
+        samples, metadata = read_wav_mono(audio_path)
+    except WavReadError as error:
+        raise TrainingDataError(str(error)) from error
+    return _extract_features_from_samples(
+        audio_path=audio_path,
+        samples=samples,
+        sample_rate_hz=metadata.sample_rate_hz,
+        start_sec=start_sec,
+        end_sec=end_sec,
+    )
+
+
+def _extract_features_from_samples(
+    audio_path: Path,
+    samples: list[float],
+    sample_rate_hz: int,
+    start_sec: float,
+    end_sec: float,
+) -> tuple[float, ...]:
     if end_sec <= start_sec:
         raise TrainingDataError(f"invalid window bounds for {audio_path}: {start_sec}..{end_sec}")
 
-    with wave.open(str(audio_path), "rb") as wav_file:
-        sample_rate = wav_file.getframerate()
-        channels = wav_file.getnchannels()
-        sample_width = wav_file.getsampwidth()
-        start_frame = int(round(start_sec * sample_rate))
-        frame_count = int(round((end_sec - start_sec) * sample_rate))
-        if start_frame + frame_count > wav_file.getnframes():
-            raise TrainingDataError(f"manifest window exceeds audio duration: {audio_path}")
-        wav_file.setpos(start_frame)
-        data = wav_file.readframes(frame_count)
+    start_index = int(round(start_sec * sample_rate_hz))
+    sample_count = int(round((end_sec - start_sec) * sample_rate_hz))
+    end_index = start_index + sample_count
+    if start_index < 0 or end_index > len(samples):
+        raise TrainingDataError(f"manifest window exceeds audio duration: {audio_path}")
 
-    samples = _decode_pcm(data, channels=channels, sample_width=sample_width)
-    if not samples:
+    window_samples = samples[start_index:end_index]
+    if not window_samples:
         raise TrainingDataError(f"empty audio window: {audio_path}")
 
-    mean = sum(samples) / len(samples)
-    mean_abs = sum(abs(sample) for sample in samples) / len(samples)
-    rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
-    peak_abs = max(abs(sample) for sample in samples)
-    zero_crossing_rate = _zero_crossing_rate(samples)
+    mean = sum(window_samples) / len(window_samples)
+    mean_abs = sum(abs(sample) for sample in window_samples) / len(window_samples)
+    rms = math.sqrt(sum(sample * sample for sample in window_samples) / len(window_samples))
+    peak_abs = max(abs(sample) for sample in window_samples)
+    zero_crossing_rate = _zero_crossing_rate(window_samples)
     return (mean, mean_abs, rms, peak_abs, zero_crossing_rate)
-
-
-def _decode_pcm(data: bytes, channels: int, sample_width: int) -> list[float]:
-    if channels < 1:
-        raise TrainingDataError("audio must have at least one channel")
-    if sample_width not in {1, 2, 4}:
-        raise TrainingDataError(f"unsupported PCM sample width: {sample_width} bytes")
-
-    frame_width = channels * sample_width
-    samples: list[float] = []
-    for frame_offset in range(0, len(data), frame_width):
-        channel_values = []
-        for channel_index in range(channels):
-            sample_offset = frame_offset + (channel_index * sample_width)
-            raw = data[sample_offset : sample_offset + sample_width]
-            if len(raw) != sample_width:
-                continue
-            if sample_width == 1:
-                value = (raw[0] - 128) / 128.0
-            else:
-                value = int.from_bytes(raw, byteorder="little", signed=True)
-                value = value / float(2 ** ((8 * sample_width) - 1))
-            channel_values.append(value)
-        if channel_values:
-            samples.append(sum(channel_values) / len(channel_values))
-    return samples
 
 
 def _zero_crossing_rate(samples: list[float]) -> float:
@@ -330,27 +436,71 @@ def _euclidean(left: tuple[float, ...], right: tuple[float, ...]) -> float:
 def _select_threshold(labels: list[str], scores: list[float]) -> float:
     if not labels:
         raise TrainingDataError("cannot select threshold without validation examples")
+    if len(labels) != len(scores):
+        raise TrainingDataError("cannot select threshold with mismatched labels and scores")
 
     unique_scores = sorted(set(scores))
-    candidates = [unique_scores[0] - 1e-12, unique_scores[-1] + 1e-12]
-    candidates.extend(unique_scores)
-    candidates.extend(
-        (left + right) / 2.0 for left, right in zip(unique_scores, unique_scores[1:])
-    )
+    positive_total = sum(1 for label in labels if label == POSITIVE_LABEL)
+    negative_total = sum(1 for label in labels if label == NEGATIVE_LABEL)
+    grouped_counts: dict[float, dict[str, int]] = {
+        score: {POSITIVE_LABEL: 0, NEGATIVE_LABEL: 0} for score in unique_scores
+    }
+    for label, score in zip(labels, scores):
+        if label in grouped_counts[score]:
+            grouped_counts[score][label] += 1
 
-    best_threshold = candidates[0]
+    best_threshold = unique_scores[0] - 1e-12
     best_key = (-1.0, -1.0, -1.0)
-    for threshold in candidates:
-        metrics = _metrics(labels, scores, threshold)
-        key = (
-            _metric_value(metrics["f2"]),
-            _metric_value(metrics["balanced_accuracy"]),
-            _metric_value(metrics["accuracy"]),
-        )
+
+    def consider(threshold: float, counts: dict[str, int]) -> None:
+        nonlocal best_threshold, best_key
+        key = _threshold_key_from_counts(counts)
         if key > best_key:
             best_key = key
             best_threshold = threshold
+
+    consider(
+        unique_scores[0] - 1e-12,
+        {"tp": positive_total, "tn": 0, "fp": negative_total, "fn": 0},
+    )
+    consider(
+        unique_scores[-1] + 1e-12,
+        {"tp": 0, "tn": negative_total, "fp": 0, "fn": positive_total},
+    )
+
+    tp = 0
+    fp = 0
+    for threshold in reversed(unique_scores):
+        tp += grouped_counts[threshold][POSITIVE_LABEL]
+        fp += grouped_counts[threshold][NEGATIVE_LABEL]
+        counts = {
+            "tp": tp,
+            "tn": negative_total - fp,
+            "fp": fp,
+            "fn": positive_total - tp,
+        }
+        consider(threshold, counts)
     return best_threshold
+
+
+def _threshold_key_from_counts(counts: Mapping[str, int]) -> tuple[float, float, float]:
+    tp = counts["tp"]
+    tn = counts["tn"]
+    fp = counts["fp"]
+    fn = counts["fn"]
+    total = tp + tn + fp + fn
+
+    precision = _safe_div(tp, tp + fp)
+    recall = _safe_div(tp, tp + fn)
+    specificity = _safe_div(tn, tn + fp)
+    f2 = _fbeta(precision, recall, beta=2.0)
+    balanced_accuracy = _average_defined(value for value in (recall, specificity))
+    accuracy = _safe_div(tp + tn, total)
+    return (
+        _metric_value(f2),
+        _metric_value(balanced_accuracy),
+        _metric_value(accuracy),
+    )
 
 
 def _metrics(labels: list[str], scores: list[float], threshold: float) -> dict[str, Any]:
@@ -415,19 +565,29 @@ def _fbeta(precision: float | None, recall: float | None, beta: float) -> float 
 
 
 def _roc_auc(labels: list[str], scores: list[float]) -> float | None:
-    positive_scores = [score for label, score in zip(labels, scores) if label == POSITIVE_LABEL]
-    negative_scores = [score for label, score in zip(labels, scores) if label == NEGATIVE_LABEL]
-    if not positive_scores or not negative_scores:
+    positive_count = sum(1 for label in labels if label == POSITIVE_LABEL)
+    negative_count = sum(1 for label in labels if label == NEGATIVE_LABEL)
+    if positive_count == 0 or negative_count == 0:
         return None
 
-    wins = 0.0
-    for positive_score in positive_scores:
-        for negative_score in negative_scores:
-            if positive_score > negative_score:
-                wins += 1.0
-            elif positive_score == negative_score:
-                wins += 0.5
-    return wins / (len(positive_scores) * len(negative_scores))
+    pairs = sorted(zip(scores, labels), key=lambda pair: pair[0])
+    rank = 1
+    positive_rank_sum = 0.0
+    index = 0
+    while index < len(pairs):
+        score = pairs[index][0]
+        end = index + 1
+        while end < len(pairs) and pairs[end][0] == score:
+            end += 1
+        average_rank = (rank + rank + (end - index) - 1) / 2.0
+        positive_rank_sum += sum(
+            average_rank for _, label in pairs[index:end] if label == POSITIVE_LABEL
+        )
+        rank += end - index
+        index = end
+
+    wins = positive_rank_sum - (positive_count * (positive_count + 1) / 2.0)
+    return wins / (positive_count * negative_count)
 
 
 def _pr_auc(labels: list[str], scores: list[float]) -> float | None:

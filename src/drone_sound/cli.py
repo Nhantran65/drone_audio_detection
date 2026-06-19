@@ -11,6 +11,7 @@ from drone_sound.dataset_registry import (
     load_dataset_registry,
     validate_dataset_registry,
 )
+from drone_sound.nasa_mat import NasaMatConversionError, convert_nasa_mat_directory
 from drone_sound.professor_data import audit_professor_zip
 from drone_sound.public_data import PublicDatasetError, build_public_manifest
 from drone_sound.training import TrainingDataError, train_v1_baseline
@@ -130,6 +131,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Deterministic seed for group split assignment.",
     )
 
+    nasa_parser = subcommands.add_parser(
+        "convert-nasa-mat",
+        help="Convert NASA Small UAS MATLAB audio files to derived mono WAV files.",
+    )
+    nasa_parser.add_argument(
+        "--mat-root",
+        required=True,
+        type=Path,
+        help="Directory containing NASA .mat files.",
+    )
+    nasa_parser.add_argument(
+        "--wav-out",
+        required=True,
+        type=Path,
+        help="Output directory for derived WAV files.",
+    )
+    nasa_parser.add_argument(
+        "--audit-out",
+        required=True,
+        type=Path,
+        help="Output JSON conversion audit path.",
+    )
+    nasa_parser.add_argument(
+        "--sample-rate",
+        required=True,
+        type=int,
+        help="Target WAV sample rate in Hz.",
+    )
+
     return parser
 
 
@@ -198,6 +228,23 @@ def main(argv: list[str] | None = None) -> int:
             "built public manifest: "
             f"{len(report['datasets'])} datasets, "
             f"{total_windows} windows -> {args.manifest_out}"
+        )
+        return 0
+
+    if args.command == "convert-nasa-mat":
+        try:
+            report = convert_nasa_mat_directory(
+                args.mat_root,
+                args.wav_out,
+                args.audit_out,
+                args.sample_rate,
+            )
+        except NasaMatConversionError as error:
+            print(f"NASA MAT conversion error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "converted NASA MAT: "
+            f"{len(report['files'])} files -> {args.wav_out}"
         )
         return 0
 

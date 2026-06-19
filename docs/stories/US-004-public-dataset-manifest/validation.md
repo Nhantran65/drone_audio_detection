@@ -31,5 +31,10 @@ scripts/bin/harness-cli story verify-all
 
 ## Acceptance Evidence
 
-- `.venv/bin/python -m pytest` -> 18 passed.
-- `scripts/bin/harness-cli story verify-all` -> 4 stories verified: 4 passed, 0 failed, 0 skipped.
+- `uv run --no-project --with pytest --python 3.13 python -m pytest` -> 18 passed.
+- Synthetic test fixtures prove all six registered dataset IDs can produce a
+  WAV manifest that feeds `train-v1`.
+- Real local all-dataset manifest creation requires running the US-005 NASA
+  `.mat` to derived WAV conversion first.
+- `scripts/bin/harness-cli story verify-all` cannot be re-run in this checkout
+  until the ignored prebuilt Harness CLI binary is restored.

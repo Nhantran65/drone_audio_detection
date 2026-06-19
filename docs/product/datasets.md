@@ -119,3 +119,8 @@ For v1 research only, the public manifest builder includes every dataset in
 `configs/datasets.json` regardless of `license_status`. License metadata remains
 in audit output and manifest notes, and this does not clear any source for
 product or commercial training.
+
+The current public manifest builder scans `.wav` files. NASA Small UAS local
+`.mat` files are converted to derived mono 16 kHz WAV files before manifest
+creation. The original MAT files remain raw source data, and the derived WAVs
+must be accompanied by the conversion audit JSON.

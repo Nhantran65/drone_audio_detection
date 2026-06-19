@@ -1,5 +1,13 @@
 # Overview
 
+## Status
+
+implemented
+
+## Lane
+
+high-risk
+
 ## Current Behavior
 
 The repo has a dataset registry and a `train-v1` command, but no public
@@ -13,6 +21,12 @@ Build a local public manifest from all datasets registered in
 `configs/datasets.json`, using local WAV folders under
 `data/raw/public/<dataset_id>/`. The manifest can feed `train-v1` for a v1
 research model.
+
+## Current Local Data Caveat
+
+The implementation supports local WAV folders. NASA Small UAS `.mat` files are
+handled by the separate US-005 derived WAV conversion step before building the
+real all-registered-dataset manifest.
 
 ## Affected Users
 

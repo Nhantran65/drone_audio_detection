@@ -3,8 +3,10 @@
 This repository is a proof of concept for detecting drone audio in short
 window-level recordings.
 
-Milestone 1 focuses on product contracts, manifest validation, and professor
-data audit tooling. It does not train a model yet.
+The current POC includes product contracts, manifest validation, professor data
+audit tooling, public dataset registry validation, public manifest assembly, and
+a dependency-free v1 smoke baseline. It is not yet a product-quality model or
+edge-export pipeline.
 
 ## Setup
 
@@ -34,11 +36,33 @@ and does not extract raw audio into the repository.
 python -m pytest
 ```
 
+If the local machine does not already have Python 3.13 and pytest installed,
+the same suite can be run through `uv`:
+
+```bash
+uv run --no-project --with pytest --python 3.13 python -m pytest
+```
+
+Tests that exercise optional data conversion dependencies use:
+
+```bash
+uv run --extra data --with pytest --python 3.13 python -m pytest
+```
+
 ## V1 Training Smoke Baseline
 
-Build the local public manifest from raw WAV folders first. V1 research uses
-all datasets registered in `configs/datasets.json`; license metadata is kept in
-the audit output but does not block the v1 experiment.
+Convert NASA MAT files into derived WAV files first, then build the local public
+manifest from raw WAV folders. V1 research uses all datasets registered in
+`configs/datasets.json`; license metadata is kept in the audit output but does
+not block the v1 experiment.
+
+```bash
+python -m drone_sound.cli convert-nasa-mat \
+  --mat-root data/raw/public/nasa_small_uas_flyover/data \
+  --wav-out data/raw/public/nasa_small_uas_flyover/converted_wav \
+  --audit-out artifacts/audits/nasa_mat_conversion_audit.json \
+  --sample-rate 16000
+```
 
 ```bash
 python -m drone_sound.cli build-public-manifest \
@@ -59,3 +83,8 @@ python -m drone_sound.cli train-v1 \
   --model-out artifacts/models/v1_baseline_model.json \
   --metrics-out artifacts/models/v1_metrics.json
 ```
+
+`convert-nasa-mat` requires the optional `data` dependencies. With `uv`, run it
+as `uv run --extra data --python 3.13 python -m drone_sound.cli convert-nasa-mat ...`.
+The same `data` extra installs `tqdm`, so `train-v1` shows per-split progress
+and ETA while extracting window features.

@@ -37,4 +37,33 @@ proposed | accepted | implemented | rejected
 
 ## Items
 
-No backlog items yet.
+## Missing Harness Capability
+
+### Title
+
+Restore local Harness CLI binary.
+
+### Discovered While
+
+Reconciling POC progress and generated artifacts after US-004.
+
+### Current Pain
+
+`scripts/bin/harness-cli` is ignored by git and is absent in this checkout, so
+the agent cannot record intake, query the durable matrix, run story
+verification, or record a trace through the required Harness CLI.
+
+### Suggested Improvement
+
+Restore the prebuilt binary with the Harness installer or document a local
+bootstrap command that installs `scripts/bin/harness-cli` for this project.
+
+### Risk
+
+Tiny.
+
+CLI value: `--risk tiny`.
+
+### Status
+
+proposed

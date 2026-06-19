@@ -33,6 +33,12 @@ write processed audio copies. Until a preprocessing story adds resampling,
 `sample_rate_processed` mirrors the audited source sample rate and sample-rate
 or channel mismatches are visible in the audit JSON.
 
+NASA Small UAS local `.mat` files are converted into derived mono 16 kHz WAV
+files before they feed the public manifest builder. Conversion reads
+`acoustics.incident_pascals`, infers source sample rate from
+`acoustics.utc_time`, downmixes channels by mean, resamples to 16 kHz, and uses
+batch-global peak scaling to write PCM int16 WAV files.
+
 ## Feature Extraction
 
 Milestone 1 did not implement feature extraction.

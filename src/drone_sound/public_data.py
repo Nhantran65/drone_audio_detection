@@ -7,7 +7,6 @@ import hashlib
 import json
 import random
 import re
-import wave
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +22,7 @@ from drone_sound.dataset_registry import (
     validate_dataset_registry,
 )
 from drone_sound.manifest import expected_window_count, validate_manifest_rows
+from drone_sound.wav_audio import WavReadError, read_wav_metadata
 
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "val"
@@ -50,6 +50,13 @@ class PublicAudioFile:
     split: str
 
 
+@dataclass(frozen=True)
+class SkippedPublicAudioFile:
+    dataset_id: str
+    relative_path: str
+    reason: str
+
+
 def build_public_manifest(
     registry_path: str | Path,
     raw_root: str | Path,
@@ -68,8 +75,10 @@ def build_public_manifest(
     validate_dataset_registry(entries)
 
     files_by_stratum: dict[tuple[str, str, str], list[PublicAudioFile]] = defaultdict(list)
+    skipped_files: list[SkippedPublicAudioFile] = []
     for entry in entries:
-        dataset_files = _scan_dataset(entry, raw_root)
+        dataset_files, dataset_skipped_files = _scan_dataset(entry, raw_root)
+        skipped_files.extend(dataset_skipped_files)
         for audio_file in dataset_files:
             stratum = (
                 _text(entry["dataset_id"]),
@@ -95,12 +104,16 @@ def build_public_manifest(
         split_seed=split_seed,
         entries=entries,
         files=split_files,
+        skipped_files=skipped_files,
     )
     audit_out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 
 
-def _scan_dataset(entry: Mapping[str, object], raw_root: Path) -> list[PublicAudioFile]:
+def _scan_dataset(
+    entry: Mapping[str, object],
+    raw_root: Path,
+) -> tuple[list[PublicAudioFile], list[SkippedPublicAudioFile]]:
     dataset_id = _text(entry["dataset_id"])
     dataset_dir = raw_root / dataset_id
     if not dataset_dir.exists():
@@ -109,36 +122,48 @@ def _scan_dataset(entry: Mapping[str, object], raw_root: Path) -> list[PublicAud
         raise PublicDatasetError(f"dataset path is not a directory: {dataset_dir}")
 
     audio_files: list[PublicAudioFile] = []
-    for path in sorted(dataset_dir.rglob("*.wav")):
-        audited = _audit_wav(entry, raw_root, path)
+    skipped_files: list[SkippedPublicAudioFile] = []
+    for path in sorted(
+        file_path
+        for file_path in dataset_dir.rglob("*")
+        if file_path.is_file() and file_path.suffix.lower() == ".wav"
+    ):
+        try:
+            audited = _audit_wav(entry, raw_root, path)
+        except WavReadError as error:
+            skipped_files.append(
+                SkippedPublicAudioFile(
+                    dataset_id=dataset_id,
+                    relative_path=path.relative_to(raw_root).as_posix(),
+                    reason=str(error),
+                )
+            )
+            continue
         if audited.estimated_windows > 0:
             audio_files.append(audited)
 
     if not audio_files:
         raise PublicDatasetError(f"dataset has no usable .wav files with complete windows: {dataset_dir}")
-    return audio_files
+    return audio_files, skipped_files
 
 
 def _audit_wav(entry: Mapping[str, object], raw_root: Path, path: Path) -> PublicAudioFile:
-    with wave.open(str(path), "rb") as wav_file:
-        frames = wav_file.getnframes()
-        sample_rate_hz = wav_file.getframerate()
-        duration_sec = frames / sample_rate_hz
-        relative_path = path.relative_to(raw_root).as_posix()
-        return PublicAudioFile(
-            dataset=entry,
-            path=path,
-            relative_path=relative_path,
-            sha256=_sha256_path(path),
-            channels=wav_file.getnchannels(),
-            sample_rate_hz=sample_rate_hz,
-            sample_width_bytes=wav_file.getsampwidth(),
-            frames=frames,
-            duration_sec=duration_sec,
-            estimated_windows=expected_window_count(duration_sec),
-            label_subtype=_infer_label_subtype(entry, relative_path),
-            split="",
-        )
+    metadata = read_wav_metadata(path)
+    relative_path = path.relative_to(raw_root).as_posix()
+    return PublicAudioFile(
+        dataset=entry,
+        path=path,
+        relative_path=relative_path,
+        sha256=_sha256_path(path),
+        channels=metadata.channels,
+        sample_rate_hz=metadata.sample_rate_hz,
+        sample_width_bytes=metadata.sample_width_bytes,
+        frames=metadata.frames,
+        duration_sec=metadata.duration_sec,
+        estimated_windows=expected_window_count(metadata.duration_sec),
+        label_subtype=_infer_label_subtype(entry, relative_path),
+        split="",
+    )
 
 
 def _infer_label_subtype(entry: Mapping[str, object], relative_path: str) -> str:
@@ -291,10 +316,14 @@ def _audit_report(
     split_seed: int,
     entries: list[Mapping[str, object]],
     files: list[PublicAudioFile],
+    skipped_files: list[SkippedPublicAudioFile],
 ) -> dict[str, Any]:
     files_by_dataset: dict[str, list[PublicAudioFile]] = defaultdict(list)
     for audio_file in files:
         files_by_dataset[_text(audio_file.dataset["dataset_id"])].append(audio_file)
+    skipped_by_dataset: dict[str, list[SkippedPublicAudioFile]] = defaultdict(list)
+    for skipped_file in skipped_files:
+        skipped_by_dataset[skipped_file.dataset_id].append(skipped_file)
 
     return {
         "registry": str(registry_path),
@@ -308,14 +337,22 @@ def _audit_report(
             "split_unit": "original_file",
         },
         "datasets": [
-            _dataset_report(entry, files_by_dataset[_text(entry["dataset_id"])])
+            _dataset_report(
+                entry,
+                files_by_dataset[_text(entry["dataset_id"])],
+                skipped_by_dataset[_text(entry["dataset_id"])],
+            )
             for entry in entries
         ],
         "splits": _split_report(files),
     }
 
 
-def _dataset_report(entry: Mapping[str, object], files: list[PublicAudioFile]) -> dict[str, Any]:
+def _dataset_report(
+    entry: Mapping[str, object],
+    files: list[PublicAudioFile],
+    skipped_files: list[SkippedPublicAudioFile],
+) -> dict[str, Any]:
     return {
         "dataset_id": _text(entry["dataset_id"]),
         "name": _text(entry["name"]),
@@ -326,6 +363,7 @@ def _dataset_report(entry: Mapping[str, object], files: list[PublicAudioFile]) -
         "label_binary": _text(entry["label_binary"]),
         "configured_label_subtypes": _as_list(entry["label_subtype"]),
         "files": len(files),
+        "skipped_files": len(skipped_files),
         "windows": sum(file.estimated_windows for file in files),
         "splits": _split_report(files),
         "audio_files": [
@@ -341,6 +379,13 @@ def _dataset_report(entry: Mapping[str, object], files: list[PublicAudioFile]) -
                 "split": file.split,
             }
             for file in files
+        ],
+        "skipped_audio_files": [
+            {
+                "original_file": skipped_file.relative_path,
+                "reason": skipped_file.reason,
+            }
+            for skipped_file in skipped_files
         ],
     }
 

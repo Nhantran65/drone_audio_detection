@@ -1,14 +1,19 @@
 # Product Docs
 
-This directory is intentionally generic and mostly empty in Harness v0.
+This directory contains the living product contract for the lightweight drone
+audio classification POC. `SPEC.md` is input material; the smaller files here
+are the current operating truth.
 
-When a user provides a project spec, derive smaller product contract files here
-instead of keeping one large spec as the living plan. Name files by the product
-domains that actually exist in that spec, for example `overview.md`,
-`billing.md`, `workflows.md`, `permissions.md`, or `api-conventions.md`.
+Current contract areas:
 
-Do not create domain files before the spec just to fill the folder. Empty
-structure is healthier than fake product truth.
+- `overview.md`: POC scope and implemented tooling.
+- `datasets.md`: dataset roles, manifest fields, splits, labels, and privacy
+  rules.
+- `dataset-sources.md`: public source registry and license status summary.
+- `preprocessing.md`: audio standardization, windowing, feature plan, and the
+  NASA MAT-to-derived-WAV conversion boundary used for v1.
+- `modeling.md`: baseline and planned model stack.
+- `evaluation.md`: public, hard-negative, and professor-data metrics rules.
 
 ## Update Rule
 

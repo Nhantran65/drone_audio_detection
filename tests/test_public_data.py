@@ -18,6 +18,7 @@ from drone_sound.public_data import PublicDatasetError, build_public_manifest
 def test_build_public_manifest_includes_all_registered_datasets(tmp_path: Path) -> None:
     raw_root = tmp_path / "raw" / "public"
     _write_all_registered_wavs(raw_root)
+    _write_unsupported_wav(raw_root / "dronenoise_database" / "unsupported_adpcm.wav")
     manifest_out = tmp_path / "data" / "manifests" / "public_manifest.csv"
     audit_out = tmp_path / "artifacts" / "audits" / "public_data_audit.json"
 
@@ -38,6 +39,12 @@ def test_build_public_manifest_includes_all_registered_datasets(tmp_path: Path) 
     assert {dataset["dataset_id"] for dataset in audit["datasets"]} == expected_ids
     assert report["policy"]["license_status_blocks_v1_training"] is False
     assert audit["policy"]["all_registered_datasets_included"] is True
+    dronenoise_report = next(
+        dataset for dataset in audit["datasets"]
+        if dataset["dataset_id"] == "dronenoise_database"
+    )
+    assert dronenoise_report["skipped_files"] == 1
+    assert "unsupported" in dronenoise_report["skipped_audio_files"][0]["reason"]
 
     statuses = {dataset["license_status"] for dataset in audit["datasets"]}
     assert "license_unspecified" in statuses
@@ -151,6 +158,8 @@ def _relative_wav_paths(entry: dict[str, object]) -> list[Path]:
             *(Path("traffic") / f"traffic_{index}.wav" for index in range(3)),
             *(Path("bg") / f"bg_{index}.wav" for index in range(3)),
         ]
+    if dataset_id == "nasa_small_uas_flyover":
+        return [Path(f"sample_{index}.WAV") for index in range(3)]
     return [Path(f"sample_{index}.wav") for index in range(3)]
 
 
@@ -172,6 +181,31 @@ def _write_wav(
             value = amplitude * math.sin(2.0 * math.pi * frequency_hz * index / sample_rate_hz)
             samples.extend(int(value * 32767).to_bytes(2, byteorder="little", signed=True))
         wav_file.writeframes(bytes(samples))
+
+
+def _write_unsupported_wav(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fmt = (
+        (17).to_bytes(2, byteorder="little")
+        + (1).to_bytes(2, byteorder="little")
+        + (16_000).to_bytes(4, byteorder="little")
+        + (16_000).to_bytes(4, byteorder="little")
+        + (1).to_bytes(2, byteorder="little")
+        + (4).to_bytes(2, byteorder="little")
+    )
+    data = b"\x00" * 16
+    riff_size = 4 + (8 + len(fmt)) + (8 + len(data))
+    path.write_bytes(
+        b"RIFF"
+        + riff_size.to_bytes(4, byteorder="little")
+        + b"WAVE"
+        + b"fmt "
+        + len(fmt).to_bytes(4, byteorder="little")
+        + fmt
+        + b"data"
+        + len(data).to_bytes(4, byteorder="little")
+        + data
+    )
 
 
 def _labels_by_split(rows: list[dict[str, str]]) -> dict[str, set[str]]:

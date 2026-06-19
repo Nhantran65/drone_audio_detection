@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 
 from drone_sound.cli import main
-from drone_sound.training import TrainingDataError, train_v1_baseline
+from drone_sound.training import (
+    NEGATIVE_LABEL,
+    POSITIVE_LABEL,
+    TrainingDataError,
+    _roc_auc,
+    _select_threshold,
+    train_v1_baseline,
+)
 
 
 def test_train_v1_cli_writes_model_and_metrics(tmp_path: Path) -> None:
@@ -126,6 +133,107 @@ def test_train_v1_requires_both_train_labels(tmp_path: Path) -> None:
             tmp_path / "model.json",
             tmp_path / "metrics.json",
         )
+
+
+def test_select_threshold_matches_legacy_bruteforce_with_tied_scores() -> None:
+    labels = [
+        POSITIVE_LABEL,
+        NEGATIVE_LABEL,
+        POSITIVE_LABEL,
+        NEGATIVE_LABEL,
+        NEGATIVE_LABEL,
+        POSITIVE_LABEL,
+    ]
+    scores = [0.8, 0.8, 0.4, 0.3, 0.1, 0.1]
+
+    assert _select_threshold(labels, scores) == pytest.approx(
+        _legacy_select_threshold(labels, scores)
+    )
+
+
+def test_roc_auc_uses_average_ranks_for_tied_scores() -> None:
+    labels = [POSITIVE_LABEL, NEGATIVE_LABEL, POSITIVE_LABEL, NEGATIVE_LABEL]
+    scores = [0.5, 0.5, 1.0, 0.0]
+
+    assert _roc_auc(labels, scores) == pytest.approx(0.875)
+
+
+def _legacy_select_threshold(labels: list[str], scores: list[float]) -> float:
+    unique_scores = sorted(set(scores))
+    candidates = [unique_scores[0] - 1e-12, unique_scores[-1] + 1e-12]
+    candidates.extend(unique_scores)
+    candidates.extend(
+        (left + right) / 2.0 for left, right in zip(unique_scores, unique_scores[1:])
+    )
+
+    best_threshold = candidates[0]
+    best_key = (-1.0, -1.0, -1.0)
+    for threshold in candidates:
+        counts = {"tp": 0, "tn": 0, "fp": 0, "fn": 0}
+        for label, score in zip(labels, scores):
+            predicted = POSITIVE_LABEL if score >= threshold else NEGATIVE_LABEL
+            if label == POSITIVE_LABEL and predicted == POSITIVE_LABEL:
+                counts["tp"] += 1
+            elif label == POSITIVE_LABEL:
+                counts["fn"] += 1
+            elif predicted == POSITIVE_LABEL:
+                counts["fp"] += 1
+            else:
+                counts["tn"] += 1
+        key = _legacy_threshold_key(counts)
+        if key > best_key:
+            best_key = key
+            best_threshold = threshold
+    return best_threshold
+
+
+def _legacy_threshold_key(counts: dict[str, int]) -> tuple[float, float, float]:
+    tp = counts["tp"]
+    tn = counts["tn"]
+    fp = counts["fp"]
+    fn = counts["fn"]
+    total = tp + tn + fp + fn
+
+    precision = _legacy_div(tp, tp + fp)
+    recall = _legacy_div(tp, tp + fn)
+    specificity = _legacy_div(tn, tn + fp)
+    f2 = _legacy_fbeta(precision, recall, beta=2.0)
+    balanced_accuracy = _legacy_average_defined([recall, specificity])
+    accuracy = _legacy_div(tp + tn, total)
+    return (
+        _legacy_metric_value(f2),
+        _legacy_metric_value(balanced_accuracy),
+        _legacy_metric_value(accuracy),
+    )
+
+
+def _legacy_div(numerator: int | float, denominator: int | float) -> float | None:
+    if denominator == 0:
+        return None
+    return numerator / denominator
+
+
+def _legacy_fbeta(precision: float | None, recall: float | None, beta: float) -> float | None:
+    if precision is None or recall is None:
+        return None
+    beta_squared = beta * beta
+    denominator = (beta_squared * precision) + recall
+    if denominator == 0:
+        return 0.0
+    return (1 + beta_squared) * precision * recall / denominator
+
+
+def _legacy_average_defined(values: list[float | None]) -> float | None:
+    defined = [value for value in values if value is not None]
+    if not defined:
+        return None
+    return sum(defined) / len(defined)
+
+
+def _legacy_metric_value(value: float | None) -> float:
+    if value is None:
+        return -1.0
+    return value
 
 
 def _write_wav(

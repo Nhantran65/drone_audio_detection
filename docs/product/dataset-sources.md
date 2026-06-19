@@ -39,6 +39,8 @@ This is project risk tracking, not legal advice.
 - Select a speech-only negative dataset after the v1 training smoke baseline.
   V1 may proceed without this source, but reports must state that
   `no_drone_speech` false-positive coverage is unavailable.
+- Run NASA Small UAS `.mat` conversion before building a real public manifest
+  that includes every registered local source.
 - Clarify NASA training license before product or commercial training claims.
 - Decide whether IDMT-TRAFFIC may be used for transformed training features or
   only for research/evaluation artifacts beyond v1 local experiments.
