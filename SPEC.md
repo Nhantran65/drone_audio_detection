@@ -1692,3 +1692,381 @@ Start with Phase 1 and Phase 2:
 6. Record or request real-world no-drone samples if possible.
 
 After that, proceed to preprocessing and baseline training.
+
+---
+
+# Appendix A - SPEC Addendum V2.1: Lightweight ML/DL Exploration
+
+## A.1 Objective
+
+V2.1 improves the V1 smoke baseline by exploring richer audio features,
+lightweight classical ML models, lightweight self-designed DL models, and
+pretrained audio embedding baselines.
+
+The task remains binary classification:
+
+```text
+drone / no_drone
+```
+
+Professor real-world data remains evaluation-only. It must not be used for
+training, validation, threshold tuning, or model selection.
+
+The goal is to identify a reportable lightweight candidate that improves over
+V1 while also checking whether pretrained audio representations provide a useful
+reference or upper-bound.
+
+## A.2 V1 Reference Baseline
+
+Current V1 result:
+
+```text
+public_test_f2: 0.871481
+public_fpr: 0.168729
+professor_recall: 0.752920
+longest_professor_missed_segment: 16.0s
+```
+
+V1 is a valid end-to-end smoke baseline, but not the final model. Its main
+weakness is that it uses simple time-domain features and may miss frequency or
+time-frequency patterns that matter for drone audio.
+
+## A.3 V2.1 Tracks
+
+V2.1 contains four experiment tracks:
+
+- V2A Classical ML on engineered `spectral_mfcc_v1` features.
+- V2B Tiny MLP on engineered `spectral_mfcc_v1` features.
+- V2C Tiny CNN on `logmel_v1` spectrograms.
+- V2D pretrained audio embeddings, reported separately as a reference baseline
+  unless the full inference path satisfies lightweight deployment constraints.
+
+V2A candidate models:
+
+```text
+Logistic Regression
+Linear SVM / SGD Classifier
+Random Forest Small
+ExtraTrees Small
+Gradient Boosting Small, optional
+```
+
+V2B suggested architecture:
+
+```text
+Input: spectral_mfcc_v1 feature vector
+Dense 64
+ReLU
+Dropout optional
+Dense 16
+ReLU
+Dense 1
+Sigmoid
+```
+
+V2C suggested input and architecture:
+
+```text
+Input: 64 x approximately 100 log-mel spectrogram
+Conv2D 8 -> BatchNorm -> ReLU
+DepthwiseSeparableConv2D 16 -> BatchNorm -> ReLU
+DepthwiseSeparableConv2D 32 -> BatchNorm -> ReLU
+GlobalAveragePooling
+Dense 1
+Sigmoid
+```
+
+V2D candidate pretrained models:
+
+```text
+YAMNet
+EfficientAT
+VGGish
+PANNs, optional
+```
+
+## A.4 Feature Sets
+
+```text
+F0 v1_basic:
+  mean, mean_abs, RMS, peak_abs, zero-crossing rate
+
+F1 spectral_v1:
+  spectral_centroid, spectral_bandwidth, spectral_rolloff,
+  spectral_flatness, spectral_contrast, dominant_frequency,
+  low_band_energy, mid_band_energy, high_band_energy,
+  band_energy_ratios
+
+F2 mfcc_v1:
+  MFCC 13 or 20 coefficients, MFCC mean, MFCC std,
+  optional delta MFCC mean/std
+
+F3 spectral_mfcc_v1:
+  v1_basic + spectral_v1 + mfcc_v1
+
+F4 logmel_v1:
+  64 mel bins, 1-second audio window, approximately 100 frames
+
+F5 pretrained_embedding_v1:
+  YAMNet / EfficientAT / VGGish / PANNs embedding
+```
+
+## A.5 Model Selection And Threshold Strategy
+
+The main selection metric remains validation F2 because the POC prioritizes
+recall over precision. Guardrail metrics:
+
+```text
+validation precision
+validation F1
+validation FPR
+public_test FPR
+professor recall
+longest missed professor segment
+model size
+inference latency
+```
+
+A candidate should not be selected if it improves F2 only by significantly
+increasing false positives.
+
+Do not assume threshold `0.5`. For each model, tune thresholds using validation
+data only and report:
+
+```text
+threshold_f1
+threshold_f2
+threshold_at_fpr_10
+threshold_at_fpr_5
+threshold_at_fpr_2
+threshold_at_fpr_1
+```
+
+The primary threshold for the reportable POC is `threshold_f2`. The secondary
+product-oriented view is recall at fixed FPR levels.
+
+## A.6 Evaluation Plan
+
+Public test remains the main binary benchmark because it contains both `drone`
+and `no_drone`. Report:
+
+```text
+accuracy
+balanced_accuracy
+precision
+recall
+f1
+f2
+roc_auc
+pr_auc
+false_positive_rate
+false_negative_rate
+confusion_matrix
+```
+
+Professor positive-only evaluation reports only:
+
+```text
+professor_recall
+missed_window_count
+longest_missed_segment_sec
+mean_p_drone
+median_p_drone
+score_std
+decision_flip_count
+decision_flip_rate
+score_quantiles
+```
+
+Do not claim professor-only accuracy, precision, specificity, false positive
+rate, or false alarms per hour.
+
+Combined public-test plus professor-positive evaluation is supplementary only
+and must not replace public test metrics.
+
+For every candidate, also report:
+
+```text
+feature_count
+model_type
+model_file_size
+parameter_count if applicable
+average_inference_time_per_window
+runtime dependency
+deployability note
+```
+
+## A.7 Milestones
+
+```text
+V2-M0 Setup and compatibility:
+  keep train-v1 and eval-v1 unchanged; define V2 command, metric, feature,
+  and model schemas.
+
+V2-M1 Engineered feature extraction:
+  implement spectral_v1, mfcc_v1, spectral_mfcc_v1, train-fitted scaler,
+  feature audit, and stable feature dimension report.
+
+V2-M2 V2A classical ML sweep:
+  train at least three lightweight classical models and generate validation
+  comparison artifacts.
+
+V2-M3 V2B Tiny MLP:
+  train a small MLP on spectral_mfcc_v1 and report params/model size.
+
+V2-M4 V2C Tiny CNN:
+  implement logmel_v1 plus Tiny CNN and evaluate frozen public/professor
+  metrics.
+
+V2-M5 V2D pretrained embedding baseline:
+  evaluate at least one pretrained embedding model, recommended first YAMNet,
+  and document deployability limitations.
+
+V2-M6 Unified evaluation and comparison:
+  generate V1 vs V2 comparison table and best candidate summary.
+
+V2-M7 Error analysis:
+  export missed professor windows, public false positives, score quantiles,
+  and traceable error analysis JSON.
+
+V2-M8 Reportable V2 candidate:
+  freeze one candidate, threshold, metrics, limitations, and final summary.
+```
+
+## A.8 Stop Criteria For Professor Report
+
+Stop and report if any deployable lightweight candidate from V2A, V2B, or V2C
+achieves:
+
+```text
+public_test_f2 >= 0.88
+professor_recall >= 0.85
+longest_professor_missed_segment_sec <= 8.0
+public_fpr <= V1 public_fpr
+model remains lightweight
+```
+
+V1 reference:
+
+```text
+public_test_f2 = 0.871481
+public_fpr = 0.168729
+professor_recall = 0.752920
+longest_professor_missed_segment = 16.0s
+```
+
+If no candidate reaches all targets, still report if one candidate clearly
+improves at least two of:
+
+```text
+professor recall
+longest missed segment
+public F2
+public FPR
+model complexity
+```
+
+If V2D pretrained embedding wins but is not deployable lightweight, report it
+as `reference_only` and select the best V2A/V2B/V2C model as the main
+deployable lightweight candidate.
+
+## A.9 Suggested CLI
+
+```bash
+uv run --extra data --python 3.13 python -m drone_sound.cli sweep-v2-ml \
+  --manifest data/manifests/public_manifest.csv \
+  --audio-root data/raw/public \
+  --feature-set spectral_mfcc_v1 \
+  --model-types logistic_regression linear_svm random_forest extra_trees \
+  --out-dir artifacts/models/v2a_ml_sweep
+```
+
+```bash
+uv run --extra data --python 3.13 python -m drone_sound.cli train-v2-mlp \
+  --manifest data/manifests/public_manifest.csv \
+  --audio-root data/raw/public \
+  --feature-set spectral_mfcc_v1 \
+  --model-out artifacts/models/v2b_tiny_mlp.pt \
+  --metrics-out artifacts/models/v2b_tiny_mlp_metrics.json
+```
+
+```bash
+uv run --extra data --python 3.13 python -m drone_sound.cli train-v2-cnn \
+  --manifest data/manifests/public_manifest.csv \
+  --audio-root data/raw/public \
+  --feature-set logmel_v1 \
+  --model-out artifacts/models/v2c_tiny_cnn.pt \
+  --metrics-out artifacts/models/v2c_tiny_cnn_metrics.json
+```
+
+```bash
+uv run --extra data --python 3.13 python -m drone_sound.cli train-v2-embedding \
+  --manifest data/manifests/public_manifest.csv \
+  --audio-root data/raw/public \
+  --embedding-model yamnet \
+  --head logistic_regression \
+  --model-out artifacts/models/v2d_yamnet_head.json \
+  --metrics-out artifacts/models/v2d_yamnet_metrics.json
+```
+
+```bash
+uv run --extra data --python 3.13 python -m drone_sound.cli eval-v2 \
+  --model artifacts/models/v2_report_model.* \
+  --public-manifest data/manifests/public_manifest.csv \
+  --public-audio-root data/raw/public \
+  --professor-manifest data/manifests/professor_manifest.csv \
+  --professor-audio-root data/raw/private/professor_real_world \
+  --metrics-out artifacts/models/v2_report_eval_metrics.json \
+  --export-errors artifacts/errors/v2_report
+```
+
+## A.10 Final V2 Report Structure
+
+The final V2 report should contain:
+
+```text
+1. Objective
+2. Dataset and split summary
+3. V1 baseline recap
+4. V2 track definitions
+5. Metrics and threshold strategy
+6. Public test comparison
+7. Professor real-world positive-only comparison
+8. Model size / lightweight comparison
+9. Selected reportable candidate
+10. Limitations
+11. Next steps
+```
+
+Required comparison table columns:
+
+```text
+model
+track
+feature/input
+public_f2
+public_f1
+public_precision
+public_recall
+public_fpr
+professor_recall
+longest_missed_segment
+model_size
+params
+deployability_label
+```
+
+Deployability labels:
+
+```text
+deployable_lightweight
+maybe_deployable
+reference_only
+```
+
+Preferred final candidate:
+
+```text
+Best V2A/V2B/V2C model that improves professor recall and public F2 without
+increasing public FPR.
+```

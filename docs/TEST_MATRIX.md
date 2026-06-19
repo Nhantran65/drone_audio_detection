@@ -26,6 +26,8 @@ matrix` when the local ignored Harness CLI binary is installed.
 | US-004 | Public dataset manifest builder | yes | yes | no | no | implemented | `python -m pytest`; synthetic all-registry WAV manifest feeds `train-v1` |
 | US-005 | NASA MAT derived WAV conversion | yes | yes | no | no | implemented | `uv run --extra data --with pytest --python 3.13 python -m pytest`; synthetic MAT conversion feeds manifest and `train-v1` |
 | US-006 | Frozen V1 professor evaluation | yes | yes | no | no | implemented | `uv run --extra data --with pytest --python 3.13 python -m pytest`; synthetic and real public/professor manifests feed `eval-v1` |
+| US-007 | V2 setup and compatibility | yes | yes | no | no | implemented | `uv run --extra data --with pytest --python 3.13 python -m pytest -q`; V2 contract and CLI skeleton tests pass |
+| US-008 | V2 engineered feature extraction | yes | yes | no | no | implemented | `uv run --extra data --with pytest --python 3.13 python -m pytest -q`; V2 engineered feature extraction and artifact tests pass |
 
 ## Evidence Rules
 

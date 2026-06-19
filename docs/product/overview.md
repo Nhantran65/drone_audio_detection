@@ -33,6 +33,20 @@ audio window contains drone sound.
 - V1 frozen evaluation tooling for public test, professor positive test, and
   caveated combined supplementary metrics.
 
+## V2.1 Exploration Scope
+
+V2.1 prepares the next reportable model phase. It keeps the binary
+`drone`/`no_drone` task, preserves V1 commands unchanged, and explores:
+
+- Classical ML on richer engineered spectral/MFCC features.
+- Tiny MLP on the same engineered features.
+- Tiny CNN on log-mel spectrograms.
+- Pretrained audio embeddings as a reference or upper-bound baseline.
+
+The V2.1 product contract is maintained in `docs/product/v2-exploration.md`.
+Professor real-world data remains evaluation-only and cannot be used for
+training, validation, threshold tuning, or model selection.
+
 ## Living Contract
 
 `SPEC.md` remains input material. Current project truth should be maintained in

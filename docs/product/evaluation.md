@@ -57,6 +57,25 @@ be used for threshold selection.
 For v1, `public_test` is a fixed split produced by the public manifest builder.
 It must not be used for threshold selection or k-fold training.
 
+For V2.1, validation F2 remains the main selection metric, with FPR, precision,
+professor recall, longest missed professor segment, model size, and inference
+latency as guardrails. A candidate should not be selected if it improves F2 only
+by significantly increasing false positives.
+
+Every V2 candidate should report these validation-selected thresholds:
+
+```text
+threshold_f1
+threshold_f2
+threshold_at_fpr_10
+threshold_at_fpr_5
+threshold_at_fpr_2
+threshold_at_fpr_1
+```
+
+The primary report threshold is `threshold_f2`. Recall at fixed FPR levels is
+the secondary product-oriented view.
+
 ## V1 Frozen Evaluation Tool
 
 `eval-v1` evaluates an already-trained V1 model without retraining or changing
@@ -75,3 +94,39 @@ python -m drone_sound.cli eval-v1 \
 Professor audio may be extracted locally to `data/raw/private/` for this
 evaluation. That folder remains private ignored data and is not a training
 source.
+
+## V2.1 Efficiency Evaluation
+
+For each V2 candidate, report:
+
+- Feature count.
+- Model type.
+- Model file size.
+- Parameter count when applicable.
+- Average inference time per 1-second window.
+- Runtime dependency.
+- Deployability note.
+
+For pretrained embedding baselines, separately report the embedding extractor
+size, classifier head size, and whether the full backbone is required at
+inference time.
+
+## V2.1 Comparison Output
+
+The final V2 comparison table should include:
+
+```text
+model
+track
+feature/input
+public_f2
+public_f1
+public_precision
+public_recall
+public_fpr
+professor_recall
+longest_missed_segment
+model_size
+params
+deployability_label
+```

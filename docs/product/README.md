@@ -14,6 +14,8 @@ Current contract areas:
   NASA MAT-to-derived-WAV conversion boundary used for v1.
 - `modeling.md`: baseline and planned model stack.
 - `evaluation.md`: public, hard-negative, and professor-data metrics rules.
+- `v2-exploration.md`: V2.1 ML/DL experiment tracks, feature sets, stop
+  criteria, and final report columns.
 
 ## Update Rule
 
