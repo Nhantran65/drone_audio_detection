@@ -3,6 +3,8 @@
 ## Default Stack
 
 - Research and training stack: PyTorch.
+- V2A classical ML stack: optional scikit-learn plus joblib under the `ml`
+  dependency extra.
 - Edge export direction: ONNX first.
 - TensorFlow Lite may be considered later if target hardware requires it.
 

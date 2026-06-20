@@ -111,6 +111,22 @@ For pretrained embedding baselines, separately report the embedding extractor
 size, classifier head size, and whether the full backbone is required at
 inference time.
 
+## V2 Frozen Evaluation Tool
+
+`eval-v2` evaluates an already-trained V2A joblib model package from a V2
+feature bundle without retraining or changing the stored `threshold_f2`:
+
+```text
+python -m drone_sound.cli eval-v2 \
+  --model artifacts/models/v2a_sweep/models/logistic_regression.joblib \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --metrics-out artifacts/models/v2a_sweep/logistic_regression_eval.json \
+  --export-errors artifacts/models/v2a_sweep/logistic_regression_errors
+```
+
+The feature bundle must include public test and professor rows plus eval
+metadata. Professor rows remain positive-only evaluation data.
+
 ## V2.1 Comparison Output
 
 The final V2 comparison table should include:

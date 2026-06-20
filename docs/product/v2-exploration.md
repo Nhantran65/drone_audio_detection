@@ -73,11 +73,24 @@ spectral_mfcc_v1: 100
 The `extract-v2-features` command writes a compressed `.npz` feature bundle, a
 train-fitted scaler JSON, and a feature audit JSON. Scaler fitting uses public
 `train` rows only; `val`, `public_test`, and professor rows use that frozen
-scaler.
+scaler. The bundle also carries evaluation metadata: `clip_id`,
+`label_subtype`, `window_start_sec`, and `window_end_sec`.
 
 Full-dataset extraction prints progress every 5,000 rows by default. Use
 `--progress-every N` to change the interval or `--progress-every 0` to suppress
 row progress logs.
+
+## V2-M2 Classical ML Sweep
+
+V2-M2 implements `sweep-v2-ml` for V2A candidates on `spectral_mfcc_v1`.
+The command reads the V2 feature bundle directly and writes joblib model
+artifacts, per-model metrics, a comparison JSON/CSV, and `best_model.json`.
+Model selection uses validation F2 at `threshold_f2`, with lower validation FPR
+and smaller model size as tie-breakers.
+
+`eval-v2` loads one frozen V2A model package, reuses the stored `threshold_f2`,
+and evaluates public test and professor rows from the same feature bundle
+without threshold retuning.
 
 ## Selection Rule
 

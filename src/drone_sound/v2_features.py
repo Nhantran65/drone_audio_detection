@@ -236,8 +236,18 @@ def build_v2_feature_bundle(
         labels=np.asarray([row["label"] for row in feature_rows]),
         splits=splits,
         window_ids=np.asarray([row["window_id"] for row in feature_rows]),
+        clip_ids=np.asarray([row["clip_id"] for row in feature_rows]),
         original_files=np.asarray([row["original_file"] for row in feature_rows]),
         source_datasets=np.asarray([row["source_dataset"] for row in feature_rows]),
+        label_subtypes=np.asarray([row["label_subtype"] for row in feature_rows]),
+        window_start_sec=np.asarray(
+            [row["window_start_sec"] for row in feature_rows],
+            dtype=np.float64,
+        ),
+        window_end_sec=np.asarray(
+            [row["window_end_sec"] for row in feature_rows],
+            dtype=np.float64,
+        ),
         is_professor_data=professor_flags,
         feature_names=np.asarray(names),
         feature_set=np.asarray(feature_set),
@@ -430,8 +440,12 @@ def _extract_rows(
                     "label": row["label_binary"],
                     "split": row["split"],
                     "window_id": row["window_id"],
+                    "clip_id": row["clip_id"],
                     "original_file": row["original_file"],
                     "source_dataset": row["source_dataset"],
+                    "label_subtype": row["label_subtype"],
+                    "window_start_sec": start_sec,
+                    "window_end_sec": end_sec,
                     "is_professor_data": row["is_professor_data"],
                 }
             )
@@ -483,9 +497,11 @@ def _normalized_row(row: Mapping[str, str], *, is_professor_data: bool) -> dict[
     return {
         "label_binary": str(row["label_binary"]).strip(),
         "split": str(row["split"]).strip(),
+        "clip_id": str(row["clip_id"]).strip(),
         "window_id": str(row["window_id"]).strip(),
         "original_file": str(row["original_file"]).strip(),
         "source_dataset": str(row["source_dataset"]).strip(),
+        "label_subtype": str(row["label_subtype"]).strip(),
         "window_start_sec": str(row["window_start_sec"]).strip(),
         "window_end_sec": str(row["window_end_sec"]).strip(),
         "is_professor_data": is_professor_data,

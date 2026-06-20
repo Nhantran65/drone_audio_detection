@@ -12,6 +12,10 @@ data = [
     "scipy>=1.14",
     "tqdm>=4.66",
 ]
+ml = [
+    "joblib>=1.4",
+    "scikit-learn>=1.7",
+]
 dev = [
     "pytest>=8.0",
 ]

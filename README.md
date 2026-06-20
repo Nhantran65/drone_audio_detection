@@ -49,6 +49,12 @@ Tests that exercise optional data conversion dependencies use:
 uv run --extra data --with pytest --python 3.13 python -m pytest
 ```
 
+V2 classical ML tests require the optional ML dependencies:
+
+```bash
+uv run --extra data --extra ml --with pytest --python 3.13 python -m pytest
+```
+
 ## V1 Training Smoke Baseline
 
 Convert NASA MAT files into derived WAV files first, then build the local public
@@ -88,6 +94,32 @@ python -m drone_sound.cli train-v1 \
 as `uv run --extra data --python 3.13 python -m drone_sound.cli convert-nasa-mat ...`.
 The same `data` extra installs `tqdm`, so `train-v1` shows per-split progress
 and ETA while extracting window features.
+
+## V2A Classical ML Sweep
+
+After extracting `spectral_mfcc_v1` features, run the classical ML sweep from
+the feature bundle. Professor rows inside the bundle are evaluation-only and do
+not affect training, threshold tuning, or model selection.
+
+```bash
+python -m drone_sound.cli sweep-v2-ml \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --model-types logistic_regression linear_svm random_forest extra_trees \
+  --out-dir artifacts/models/v2a_sweep
+```
+
+Evaluate a frozen V2A model without retuning its stored threshold:
+
+```bash
+python -m drone_sound.cli eval-v2 \
+  --model artifacts/models/v2a_sweep/models/logistic_regression.joblib \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --metrics-out artifacts/models/v2a_sweep/logistic_regression_eval.json \
+  --export-errors artifacts/models/v2a_sweep/logistic_regression_errors
+```
+
+Use `uv run --extra data --extra ml --python 3.13 ...` if the local
+environment does not already have the optional dependencies installed.
 
 ## V1 Frozen Model Evaluation
 

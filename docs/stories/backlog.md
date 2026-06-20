@@ -15,7 +15,7 @@ or when a product decision needs a durable place to land.
 | Modeling | Add the first non-smoke baseline after feature extraction, likely classical MFCC or a tiny PyTorch model | candidate |
 | V2-M0 setup | Keep V1 commands unchanged while adding V2 feature/model/metrics schema and CLI skeletons | implemented as US-007 |
 | V2-M1 engineered features | Implement `spectral_v1`, `mfcc_v1`, `spectral_mfcc_v1`, train-fitted scaler, and feature audit JSON | implemented as US-008 |
-| V2-M2 classical ML sweep | Train at least three V2A classical ML candidates on `spectral_mfcc_v1` and generate comparison artifacts | candidate |
+| V2-M2 classical ML sweep | Train at least three V2A classical ML candidates on `spectral_mfcc_v1` and generate comparison artifacts | implemented as US-009 |
 | V2-M3 tiny MLP | Train and evaluate V2B Tiny MLP on engineered features, including parameter count and model size | candidate |
 | V2-M4 tiny CNN | Implement `logmel_v1`, train V2C Tiny CNN, and evaluate frozen public/professor metrics | candidate |
 | V2-M5 pretrained embedding | Evaluate at least one V2D pretrained embedding baseline, recommended first YAMNet, as reference-only unless deployable | candidate |

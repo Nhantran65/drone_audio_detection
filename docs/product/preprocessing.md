@@ -101,5 +101,7 @@ DCT-II, and mean/std plus delta mean/std summaries across frames.
 - Train-fitted scaler JSON.
 - Feature audit JSON with row counts, dimensions, and non-finite replacement
   counts.
+- Eval metadata arrays: `clip_id`, `label_subtype`, `window_start_sec`, and
+  `window_end_sec`.
 - Progress logs every 5,000 rows by default; override with `--progress-every N`
   or use `--progress-every 0` to disable row progress logs.

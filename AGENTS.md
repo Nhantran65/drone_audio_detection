@@ -1,6 +1,20 @@
 # Agent Instructions
 
-Add project-specific agent instructions here.
+## Long-Running Process Visibility
+
+Any dataset, preprocessing, feature extraction, training, sweep, evaluation, or
+benchmark command that may take more than a few seconds must expose progress.
+Use `tqdm` or explicit logs that show enough runtime context to tell whether the
+job is healthy:
+
+- elapsed time
+- processed count and total count when known
+- throughput/rate when useful
+- ETA when useful
+- current phase or current file/model when useful
+
+Do not leave long-running data or ML jobs silent. If an existing command is
+silent, add progress reporting before relying on it for real local runs.
 
 <!-- HARNESS:BEGIN -->
 ## Harness

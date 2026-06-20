@@ -46,6 +46,8 @@ V2.1 prepares the next reportable model phase. It keeps the binary
 The V2.1 product contract is maintained in `docs/product/v2-exploration.md`.
 Professor real-world data remains evaluation-only and cannot be used for
 training, validation, threshold tuning, or model selection.
+V2A classical ML sweep and frozen V2 evaluation are implemented from V2 feature
+bundles.
 
 ## Living Contract
 

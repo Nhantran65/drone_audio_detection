@@ -26,7 +26,6 @@ from drone_sound.v2 import (
     V2InputError,
     V2NotImplementedError,
     validate_manifest_and_audio_root,
-    validate_v2_evaluation_inputs,
 )
 from drone_sound.v1_evaluation import V1EvaluationError, evaluate_frozen_v1_model
 
@@ -274,25 +273,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sweep_v2_parser = subcommands.add_parser(
         "sweep-v2-ml",
-        help="Run the V2A classical ML sweep skeleton.",
+        help="Run the V2A classical ML sweep from a V2 feature bundle.",
     )
     sweep_v2_parser.add_argument(
-        "--manifest",
+        "--features",
         required=True,
         type=Path,
-        help="Public manifest CSV containing train/val/public_test rows.",
-    )
-    sweep_v2_parser.add_argument(
-        "--audio-root",
-        required=True,
-        type=Path,
-        help="Directory used to resolve manifest original_file paths.",
-    )
-    sweep_v2_parser.add_argument(
-        "--feature-set",
-        required=True,
-        choices=FEATURE_SETS,
-        help="V2 feature set name.",
+        help="V2 .npz feature bundle from extract-v2-features.",
     )
     sweep_v2_parser.add_argument(
         "--model-types",
@@ -305,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-dir",
         required=True,
         type=Path,
-        help="Output directory for future V2A sweep artifacts.",
+        help="Output directory for V2A sweep artifacts.",
     )
 
     mlp_parser = subcommands.add_parser(
@@ -421,7 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_v2_parser = subcommands.add_parser(
         "eval-v2",
-        help="Evaluate a frozen V2 model skeleton.",
+        help="Evaluate a frozen V2 model from a V2 feature bundle.",
     )
     eval_v2_parser.add_argument(
         "--model",
@@ -430,28 +417,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Frozen V2 model path.",
     )
     eval_v2_parser.add_argument(
-        "--public-manifest",
+        "--features",
         required=True,
         type=Path,
-        help="Public manifest CSV containing public_test rows.",
-    )
-    eval_v2_parser.add_argument(
-        "--public-audio-root",
-        required=True,
-        type=Path,
-        help="Directory used to resolve public manifest original_file paths.",
-    )
-    eval_v2_parser.add_argument(
-        "--professor-manifest",
-        required=True,
-        type=Path,
-        help="Professor manifest CSV containing professor_test rows.",
-    )
-    eval_v2_parser.add_argument(
-        "--professor-audio-root",
-        required=True,
-        type=Path,
-        help="Directory containing extracted professor WAV files.",
+        help="V2 .npz feature bundle containing public_test and professor_test rows.",
     )
     eval_v2_parser.add_argument(
         "--metrics-out",
@@ -608,10 +577,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "sweep-v2-ml":
-        return _run_v2_skeleton(
-            "classical ML sweep",
-            lambda: validate_manifest_and_audio_root(args.manifest, args.audio_root),
+        from drone_sound.v2_ml import V2MLError, run_v2a_sweep
+
+        try:
+            report = run_v2a_sweep(
+                args.features,
+                args.model_types,
+                args.out_dir,
+                progress_callback=_v2_ml_progress_logger(),
+            )
+        except V2MLError as error:
+            print(f"v2 ml error: {error}", file=sys.stderr)
+            return 1
+        best = report["best_model"]
+        print(
+            "completed v2a sweep: "
+            f"best_model={best['selected_model']} -> {args.out_dir}"
         )
+        return 0
 
     if args.command == "train-v2-mlp":
         return _run_v2_skeleton(
@@ -632,16 +615,32 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "eval-v2":
-        return _run_v2_skeleton(
-            "frozen V2 evaluation",
-            lambda: validate_v2_evaluation_inputs(
+        from drone_sound.v2_ml import V2MLError, evaluate_v2_model
+
+        try:
+            report = evaluate_v2_model(
                 args.model,
-                args.public_manifest,
-                args.public_audio_root,
-                args.professor_manifest,
-                args.professor_audio_root,
-            ),
+                args.features,
+                args.metrics_out,
+                args.export_errors,
+            )
+        except V2MLError as error:
+            print(f"v2 ml error: {error}", file=sys.stderr)
+            return 1
+        public_f2 = report["public_test"]["metrics"]["f2"]
+        professor_metrics = report["professor_test"]["metrics"] or {}
+        professor_recall = professor_metrics.get("recall")
+        professor_fragment = (
+            f" professor_recall={professor_recall:.6f}"
+            if professor_recall is not None
+            else ""
         )
+        print(
+            "evaluated frozen v2 model: "
+            f"public_test_f2={_format_metric(public_f2)}"
+            f"{professor_fragment} -> {args.metrics_out}"
+        )
+        return 0
 
     parser.error(f"unknown command: {args.command}")
     return 2
@@ -657,6 +656,45 @@ def _run_v2_skeleton(capability: str, validate_inputs: Callable[[], None]) -> in
     except V2NotImplementedError as error:
         print(str(error), file=sys.stderr)
         return 1
+
+
+def _format_metric(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.6f}"
+
+
+def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
+    started_at = time.monotonic()
+
+    def log(event: dict[str, Any]) -> None:
+        elapsed = _format_duration(time.monotonic() - started_at)
+        model_type = event.get("model_type", "unknown")
+        event_name = event.get("event")
+        if event_name == "model_start":
+            print(
+                f"v2 ml progress: start model={model_type} elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "model_fit_complete":
+            print(
+                f"v2 ml progress: fit complete model={model_type} elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "model_complete":
+            print(
+                "v2 ml progress: "
+                f"complete model={model_type} elapsed={elapsed} "
+                f"model_path={event['model_path']}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    return log
 
 
 def _v2_feature_progress_logger() -> Callable[[dict[str, Any]], None]:

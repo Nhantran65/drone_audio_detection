@@ -74,3 +74,5 @@ command `uv run --extra data --with pytest --python 3.13 python -m pytest -q`.
 
 - `uv run --extra data --with pytest --python 3.13 python -m pytest tests/test_v2_contract.py tests/test_v2_cli.py tests/test_v2_features.py -q` -> 19 passed.
 - `uv run --extra data --with pytest --python 3.13 python -m pytest -q` -> 52 passed.
+- Real local extraction rerun after US-009 metadata addition:
+  `uv run --extra data --python 3.13 python -m drone_sound.cli extract-v2-features ... --feature-set spectral_mfcc_v1 ... --progress-every 50000` -> 402383 rows, 100 features, 0 non-finite replacements.

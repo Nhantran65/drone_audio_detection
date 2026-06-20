@@ -173,9 +173,14 @@ def test_extract_v2_features_cli_writes_feature_scaler_and_audit_artifacts(
     assert bundle["raw_features"].shape == (7, 100)
     assert bundle["scaled_features"].shape == (7, 100)
     assert bundle["feature_names"].shape == (100,)
+    assert bundle["clip_ids"].shape == (7,)
+    assert bundle["label_subtypes"].shape == (7,)
+    assert bundle["window_start_sec"].shape == (7,)
+    assert bundle["window_end_sec"].shape == (7,)
     assert list(bundle["splits"]).count("train") == 2
     assert list(bundle["splits"]).count("professor_test") == 1
     assert int(np.count_nonzero(bundle["is_professor_data"])) == 1
+    assert "professor-clip" in set(bundle["clip_ids"])
     assert scaler["fitted_split"] == "train"
     assert scaler["train_rows"] == 2
     assert len(scaler["mean"]) == 100
