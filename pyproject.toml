@@ -16,6 +16,10 @@ ml = [
     "joblib>=1.4",
     "scikit-learn>=1.7",
 ]
+dl = [
+    "torch>=2.12",
+    "torchaudio>=2.11",
+]
 dev = [
     "pytest>=8.0",
 ]

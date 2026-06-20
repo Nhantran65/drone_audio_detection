@@ -5,6 +5,8 @@
 - Research and training stack: PyTorch.
 - V2A classical ML stack: optional scikit-learn plus joblib under the `ml`
   dependency extra.
+- V2C/V2D stack: optional PyTorch plus torchaudio under the `dl` dependency
+  extra.
 - Edge export direction: ONNX first.
 - TensorFlow Lite may be considered later if target hardware requires it.
 
@@ -42,6 +44,12 @@ increasing public FPR.
 
 V2D answers whether transfer learning helps, but it does not automatically
 become the reportable lightweight model if the full backbone is too heavy.
+V2D must follow the spec-preferred pretrained audio embedding families:
+YAMNet, EfficientAT, VGGish, or PANNs.
+
+V2B and V2C training keeps the best validation checkpoint and can stop early
+with `patience`/`min_delta`. Metrics JSON stores the epoch-level learning curve
+so later model selection can distinguish true improvement from plateau noise.
 
 ## V2.1 Stop Criteria
 

@@ -61,6 +61,9 @@ yamnet_head
 | `logmel_v1` | 64 mel bins, 1-second window, about 100 frames | V2C Tiny CNN input |
 | `pretrained_embedding_v1` | YAMNet/EfficientAT/VGGish/PANNs embedding | V2D transfer-learning reference |
 
+V2D must use the spec-preferred pretrained audio embedding families above. Do
+not substitute unrelated pretrained backbones without an explicit spec update.
+
 Implemented V2-M1 engineered dimensions:
 
 ```text
@@ -153,6 +156,25 @@ Efficiency reporting for every candidate:
 - Average inference time per 1-second window.
 - Runtime dependency.
 - Deployability note.
+
+## V2B/V2C Early Stopping
+
+`train-v2-mlp` and `train-v2-cnn` support validation-based early stopping with
+`--patience` and `--min-delta`. Both commands keep the best validation
+checkpoint by `threshold_f2`, with validation FPR as the near-tie breaker, and
+write `learning_curve` plus `early_stopping` blocks into the metrics JSON.
+
+Current full-data rerun artifacts:
+
+- `artifacts/models/v2b_mlp/tiny_mlp_es_metrics.json`: 20/20 epochs, best epoch
+  19, public F2 0.997475, public FPR 0.003234, professor recall 0.791554,
+  longest missed professor segment 6.5s.
+- `artifacts/models/v2c_cnn/tiny_cnn_es_metrics.json`: 20/20 epochs, best epoch
+  18, public F2 0.966515, public FPR 0.039830, professor recall 0.554358,
+  longest missed professor segment 19.0s.
+
+Neither run stopped before the 20-epoch cap, so the curves are near plateau but
+not flat enough to trigger early stopping under `min_delta=0.0005`.
 
 ## Stop Criteria
 

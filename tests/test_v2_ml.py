@@ -18,6 +18,7 @@ from drone_sound.v2_ml import (
     load_feature_bundle,
     run_v2a_sweep,
     select_thresholds,
+    train_v2_mlp,
 )
 
 
@@ -106,6 +107,31 @@ def test_eval_v2_reuses_frozen_threshold_and_exports_errors(tmp_path: Path) -> N
     assert report["professor_test"]["metrics"]["rows"] == 3
     assert (errors_out / "public_false_positives.csv").exists()
     assert (errors_out / "professor_missed_windows.csv").exists()
+
+
+def test_train_v2_mlp_writes_frozen_model_and_metrics(tmp_path: Path) -> None:
+    features = _write_feature_bundle(tmp_path / "features.npz")
+    model_out = tmp_path / "models" / "tiny_mlp.joblib"
+    metrics_out = tmp_path / "metrics" / "tiny_mlp.json"
+
+    report = train_v2_mlp(
+        features,
+        model_out,
+        metrics_out,
+        epochs=2,
+        batch_size=4,
+        patience=2,
+    )
+
+    stored = json.loads(metrics_out.read_text(encoding="utf-8"))
+    assert report["model_type"] == "tiny_mlp"
+    assert report["track"] == "v2b"
+    assert stored["threshold_name"] == "threshold_f2"
+    assert stored["selection"]["uses_professor_data"] is False
+    assert stored["early_stopping"]["enabled"] is True
+    assert stored["early_stopping"]["epochs_requested"] == 2
+    assert len(stored["learning_curve"]) == stored["early_stopping"]["epochs_ran"]
+    assert model_out.exists()
 
 
 def test_missing_feature_bundle_reports_clear_error(tmp_path: Path) -> None:

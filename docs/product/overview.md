@@ -47,7 +47,10 @@ The V2.1 product contract is maintained in `docs/product/v2-exploration.md`.
 Professor real-world data remains evaluation-only and cannot be used for
 training, validation, threshold tuning, or model selection.
 V2A classical ML sweep and frozen V2 evaluation are implemented from V2 feature
-bundles.
+bundles. V2B Tiny MLP and V2C Tiny CNN runs are implemented and summarized in
+`artifacts/models/v2_full_comparison/comparison.csv`. V2D remains pending until
+a spec-compliant pretrained audio embedding backend, such as YAMNet,
+EfficientAT, VGGish, or PANNs, is implemented.
 
 ## Living Contract
 

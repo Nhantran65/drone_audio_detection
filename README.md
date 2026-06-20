@@ -121,6 +121,44 @@ python -m drone_sound.cli eval-v2 \
 Use `uv run --extra data --extra ml --python 3.13 ...` if the local
 environment does not already have the optional dependencies installed.
 
+## V2B/V2C/V2D Experiment Tracks
+
+After `spectral_mfcc_v1` extraction and V2A, the remaining V2 tracks can be
+run from the same feature bundle. Tiny MLP uses `data` plus `ml`; Tiny CNN and
+pretrained embeddings also require the optional `dl` extra.
+
+```bash
+python -m drone_sound.cli train-v2-mlp \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --model-out artifacts/models/v2b_mlp/tiny_mlp.joblib \
+  --metrics-out artifacts/models/v2b_mlp/tiny_mlp_metrics.json \
+  --epochs 20 \
+  --patience 3 \
+  --min-delta 0.0005
+```
+
+```bash
+python -m drone_sound.cli train-v2-cnn \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --public-audio-root data/raw/public \
+  --professor-audio-root data/raw/private/professor_real_world \
+  --model-out artifacts/models/v2c_cnn/tiny_cnn.pt \
+  --metrics-out artifacts/models/v2c_cnn/tiny_cnn_metrics.json \
+  --cache-dir artifacts/features/v2_logmel_cache \
+  --epochs 20 \
+  --patience 4 \
+  --min-delta 0.0005
+```
+
+V2D remains pending until a spec-compliant pretrained audio embedding backend
+is implemented. Use YAMNet, EfficientAT, VGGish, or PANNs for that track; do
+not substitute an unrelated pretrained backend without updating the spec first.
+
+The combined V1/V2 comparison artifacts are written under
+`artifacts/models/v2_full_comparison/`. V2B/V2C metrics include
+`learning_curve` and `early_stopping` blocks when trained with the current
+commands.
+
 ## V1 Frozen Model Evaluation
 
 After training, evaluate the frozen model and validation-selected threshold on

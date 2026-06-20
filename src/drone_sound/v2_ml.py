@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import math
 import statistics
@@ -29,10 +30,15 @@ from drone_sound.v2 import (
 
 PROFESSOR_TEST_SPLIT = "professor_test"
 V2A_TRACK = "v2a"
+V2B_TRACK = "v2b"
 V2A_FEATURE_SET = "spectral_mfcc_v1"
 MODEL_SCHEMA_VERSION = "v2a_model_v1"
 PRIMARY_THRESHOLD_NAME = "threshold_f2"
 RANDOM_SEED = 20260619
+V2B_DEFAULT_EPOCHS = 8
+V2B_DEFAULT_BATCH_SIZE = 4096
+V2B_DEFAULT_PATIENCE = 3
+V2_DEFAULT_MIN_DELTA = 0.0
 FIXED_FPR_THRESHOLDS = {
     "threshold_at_fpr_10": 0.10,
     "threshold_at_fpr_5": 0.05,
@@ -352,6 +358,208 @@ def run_v2a_sweep(
     return comparison
 
 
+def train_v2_mlp(
+    features_path: str | Path,
+    model_out: str | Path,
+    metrics_out: str | Path,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    epochs: int = V2B_DEFAULT_EPOCHS,
+    batch_size: int = V2B_DEFAULT_BATCH_SIZE,
+    patience: int = V2B_DEFAULT_PATIENCE,
+    min_delta: float = V2_DEFAULT_MIN_DELTA,
+) -> dict[str, Any]:
+    """Train the V2B Tiny MLP on a V2 engineered feature bundle."""
+
+    if epochs <= 0:
+        raise V2MLError("epochs must be > 0")
+    if batch_size <= 0:
+        raise V2MLError("batch size must be > 0")
+    if patience <= 0:
+        raise V2MLError("patience must be > 0")
+    if min_delta < 0:
+        raise V2MLError("min_delta must be >= 0")
+    bundle = load_feature_bundle(features_path)
+    _require_feature_set(bundle)
+    partitions = _validated_partitions(bundle)
+    np, joblib, classes = _require_ml_dependencies()
+    train_indices = np.asarray(_row_indices(partitions["train"]), dtype=np.int64)
+    train_labels = np.asarray(_labels_for_mask(bundle, partitions["train"]))
+    estimator = classes["MLPClassifier"](
+        hidden_layer_sizes=(64, 16),
+        activation="relu",
+        solver="adam",
+        alpha=1e-4,
+        batch_size=batch_size,
+        learning_rate_init=1e-3,
+        random_state=RANDOM_SEED,
+        max_iter=1,
+        warm_start=True,
+        shuffle=False,
+    )
+    class_labels = np.asarray([NEGATIVE_LABEL, POSITIVE_LABEL])
+    best_estimator: Any | None = None
+    best_key: tuple[float, float] = (-1.0, -1.0)
+    best_epoch: int | None = None
+    no_improvement_epochs = 0
+    learning_curve: list[dict[str, Any]] = []
+    stopped_epoch: int | None = None
+    rng = np.random.default_rng(RANDOM_SEED)
+    first_batch = True
+    total_batches = math.ceil(len(train_indices) / batch_size)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "model_start",
+                "model_type": "tiny_mlp",
+                "epochs": epochs,
+                "train_rows": len(train_indices),
+                "batch_size": batch_size,
+                "patience": patience,
+                "min_delta": min_delta,
+            }
+        )
+    for epoch in range(1, epochs + 1):
+        shuffled = rng.permutation(train_indices)
+        running_loss = 0.0
+        seen_batches = 0
+        for batch_number, start in enumerate(range(0, len(shuffled), batch_size), start=1):
+            batch_indices = shuffled[start : start + batch_size]
+            batch_labels = np.asarray([bundle.labels[int(index)] for index in batch_indices])
+            kwargs = {"classes": class_labels} if first_batch else {}
+            estimator.partial_fit(bundle.features[batch_indices], batch_labels, **kwargs)
+            first_batch = False
+            loss = float(getattr(estimator, "loss_", 0.0) or 0.0)
+            running_loss += loss
+            seen_batches += 1
+            if progress_callback is not None and (
+                batch_number == total_batches
+                or batch_number == 1
+                or batch_number % 20 == 0
+            ):
+                progress_callback(
+                    {
+                        "event": "batch_progress",
+                        "model_type": "tiny_mlp",
+                        "epoch": epoch,
+                        "epochs": epochs,
+                        "batch": batch_number,
+                        "batches": total_batches,
+                        "loss": loss,
+                    }
+                )
+        val_scores = _score_estimator(estimator, bundle.features[partitions["val"]])
+        val_labels = _labels_for_mask(bundle, partitions["val"])
+        thresholds = select_thresholds(val_labels, val_scores)
+        threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+        val_metrics = _metrics(val_labels, val_scores, threshold)
+        key = (
+            _metric_sort_value(val_metrics["f2"]),
+            -_metric_sort_value(val_metrics["false_positive_rate"], missing=1.0),
+        )
+        improved = _early_stopping_improved(key, best_key, min_delta)
+        if improved:
+            best_key = key
+            best_estimator = copy.deepcopy(estimator)
+            best_epoch = epoch
+            no_improvement_epochs = 0
+        else:
+            no_improvement_epochs += 1
+        average_loss = running_loss / max(seen_batches, 1)
+        learning_curve.append(
+            {
+                "epoch": epoch,
+                "training_loss": average_loss,
+                "validation_f2": val_metrics["f2"],
+                "validation_fpr": val_metrics["false_positive_rate"],
+                "threshold_f2": threshold,
+                "is_best": improved,
+            }
+        )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "epoch_complete",
+                    "model_type": "tiny_mlp",
+                    "epoch": epoch,
+                    "epochs": epochs,
+                    "loss": average_loss,
+                    "validation_f2": val_metrics["f2"],
+                    "validation_fpr": val_metrics["false_positive_rate"],
+                    "improved": improved,
+                    "best_epoch": best_epoch,
+                }
+            )
+        if no_improvement_epochs >= patience:
+            stopped_epoch = epoch
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "early_stop",
+                        "model_type": "tiny_mlp",
+                        "epoch": epoch,
+                        "epochs": epochs,
+                        "best_epoch": best_epoch,
+                        "patience": patience,
+                        "min_delta": min_delta,
+                    }
+                )
+            break
+    if best_estimator is None:
+        best_estimator = estimator
+        best_epoch = len(learning_curve) or None
+
+    metrics = _feature_model_metrics(
+        bundle,
+        best_estimator,
+        "tiny_mlp",
+        V2B_TRACK,
+        "v2b_tiny_mlp",
+        partitions,
+        runtime_dependency="scikit-learn",
+        deployability_label="deployable_lightweight",
+    )
+    metrics["learning_curve"] = learning_curve
+    metrics["early_stopping"] = {
+        "enabled": True,
+        "patience": patience,
+        "min_delta": min_delta,
+        "epochs_requested": epochs,
+        "epochs_ran": len(learning_curve),
+        "best_epoch": best_epoch,
+        "stopped_epoch": stopped_epoch,
+        "stopped_early": stopped_epoch is not None,
+    }
+    output_model = Path(model_out)
+    output_metrics = Path(metrics_out)
+    output_model.parent.mkdir(parents=True, exist_ok=True)
+    model_package = _model_package_for_track(
+        bundle,
+        best_estimator,
+        "tiny_mlp",
+        V2B_TRACK,
+        "v2b_tiny_mlp",
+        metrics,
+    )
+    joblib.dump(model_package, output_model)
+    model_size = output_model.stat().st_size
+    metrics["model_path"] = str(output_model)
+    metrics["metrics_path"] = str(output_metrics)
+    metrics["efficiency"]["model_size_bytes"] = model_size
+    metrics["efficiency"]["model_size"] = _format_bytes(model_size)
+    _write_json(output_metrics, metrics)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "model_complete",
+                "model_type": "tiny_mlp",
+                "model_path": str(output_model),
+                "metrics_path": str(output_metrics),
+            }
+        )
+    return metrics
+
+
 def evaluate_v2_model(
     model_path: str | Path,
     features_path: str | Path,
@@ -534,6 +742,83 @@ def _candidate_metrics(
     }
 
 
+def _feature_model_metrics(
+    bundle: V2FeatureBundle,
+    estimator: Any,
+    model_type: str,
+    track: str,
+    algorithm: str,
+    partitions: Mapping[str, Any],
+    *,
+    runtime_dependency: str,
+    deployability_label: str,
+) -> dict[str, Any]:
+    val_scores = _score_estimator(estimator, bundle.features[partitions["val"]])
+    val_labels = _labels_for_mask(bundle, partitions["val"])
+    thresholds = select_thresholds(val_labels, val_scores)
+    threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+    public_scores, inference = _score_with_timing(
+        estimator,
+        bundle.features[partitions["public_test"]],
+    )
+    public_labels = _labels_for_mask(bundle, partitions["public_test"])
+    professor_scores = _score_estimator(estimator, bundle.features[partitions["professor_test"]])
+
+    return {
+        "schema_version": "v2_metrics_v1",
+        "algorithm": algorithm,
+        "model_type": model_type,
+        "track": track,
+        "feature_set": bundle.feature_set,
+        "feature_bundle": str(bundle.path),
+        "feature_count": bundle.feature_count,
+        "threshold_name": PRIMARY_THRESHOLD_NAME,
+        "threshold": threshold,
+        "thresholds": thresholds,
+        "training": {
+            "counts": _counts_for_mask(bundle, partitions["train"]),
+        },
+        "validation": {
+            "counts": _counts_for_mask(bundle, partitions["val"]),
+            "primary": _metrics(val_labels, val_scores, threshold),
+            "metrics_by_threshold": {
+                name: _metrics(val_labels, val_scores, value)
+                for name, value in thresholds.items()
+            },
+        },
+        "public_test": {
+            "counts": _counts_for_mask(bundle, partitions["public_test"]),
+            "metrics": _metrics(public_labels, public_scores, threshold),
+            "false_positive_rate_by_subtype": _false_positive_rate_by_subtype(
+                bundle,
+                partitions["public_test"],
+                public_scores,
+                threshold,
+            ),
+        },
+        "professor_test": {
+            "counts": _counts_for_mask(bundle, partitions["professor_test"]),
+            "metrics": _professor_metrics(bundle, partitions["professor_test"], professor_scores, threshold),
+        },
+        "efficiency": {
+            "feature_count": bundle.feature_count,
+            "model_type": model_type,
+            "model_size_bytes": None,
+            "model_size": None,
+            "parameter_count": _model_parameter_count(estimator),
+            "tree_node_count": _tree_node_count(estimator),
+            "average_inference_time_sec_per_window": inference,
+            "runtime_dependency": runtime_dependency,
+            "deployability_label": deployability_label,
+        },
+        "selection": {
+            "uses_professor_data": False,
+            "primary_metric": "validation.f2",
+            "primary_threshold": PRIMARY_THRESHOLD_NAME,
+        },
+    }
+
+
 def _fit_estimator(model_type: str, bundle: V2FeatureBundle, train_mask: Any) -> Any:
     _, _, classes = _require_ml_dependencies()
     labels = _labels_for_mask(bundle, train_mask)
@@ -587,6 +872,20 @@ def _fit_estimator(model_type: str, bundle: V2FeatureBundle, train_mask: Any) ->
     return estimator
 
 
+def _early_stopping_improved(
+    key: tuple[float, float],
+    best_key: tuple[float, float],
+    min_delta: float,
+) -> bool:
+    f2, negative_fpr = key
+    best_f2, best_negative_fpr = best_key
+    if f2 > best_f2 + min_delta:
+        return True
+    if abs(f2 - best_f2) <= min_delta and negative_fpr > best_negative_fpr:
+        return True
+    return False
+
+
 def _model_package(
     bundle: V2FeatureBundle,
     estimator: Any,
@@ -611,6 +910,20 @@ def _model_package(
         "deployability_label": metrics["efficiency"]["deployability_label"],
         "selection": dict(metrics["selection"]),
     }
+
+
+def _model_package_for_track(
+    bundle: V2FeatureBundle,
+    estimator: Any,
+    model_type: str,
+    track: str,
+    algorithm: str,
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    package = _model_package(bundle, estimator, model_type, metrics)
+    package["algorithm"] = algorithm
+    package["track"] = track
+    return package
 
 
 def _validated_partitions(bundle: V2FeatureBundle) -> dict[str, Any]:
@@ -1116,6 +1429,13 @@ def _direct_parameter_count(estimator: Any) -> int | None:
         if values is not None and hasattr(values, "size"):
             total += int(values.size)
             found = True
+    for attribute in ("coefs_", "intercepts_"):
+        values = getattr(estimator, attribute, None)
+        if values is not None:
+            for value in values:
+                if hasattr(value, "size"):
+                    total += int(value.size)
+                    found = True
     return total if found else None
 
 
@@ -1192,7 +1512,8 @@ def _require_ml_dependencies() -> tuple[Any, Any, dict[str, Any]]:
         import joblib
         from sklearn.calibration import CalibratedClassifierCV
         from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
-        from sklearn.linear_model import LogisticRegression
+        from sklearn.linear_model import LogisticRegression, SGDClassifier
+        from sklearn.neural_network import MLPClassifier
         from sklearn.svm import LinearSVC
     except ImportError as error:  # pragma: no cover - dependency guard.
         raise V2MLError(
@@ -1205,5 +1526,7 @@ def _require_ml_dependencies() -> tuple[Any, Any, dict[str, Any]]:
         "ExtraTreesClassifier": ExtraTreesClassifier,
         "LinearSVC": LinearSVC,
         "LogisticRegression": LogisticRegression,
+        "MLPClassifier": MLPClassifier,
         "RandomForestClassifier": RandomForestClassifier,
+        "SGDClassifier": SGDClassifier,
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,77 +9,83 @@ from drone_sound.cli import main
 from drone_sound.training import NEGATIVE_LABEL, POSITIVE_LABEL
 
 
-@pytest.mark.parametrize(
-    ("argv_builder", "expected_error"),
-    [
-        (
-            lambda manifest, audio_root, tmp_path: [
-                "train-v2-mlp",
-                "--manifest",
-                str(manifest),
-                "--audio-root",
-                str(audio_root),
-                "--feature-set",
-                "spectral_mfcc_v1",
-                "--model-out",
-                str(tmp_path / "mlp.pt"),
-                "--metrics-out",
-                str(tmp_path / "mlp_metrics.json"),
-            ],
-            "v2 not implemented: Tiny MLP training",
-        ),
-        (
-            lambda manifest, audio_root, tmp_path: [
-                "train-v2-cnn",
-                "--manifest",
-                str(manifest),
-                "--audio-root",
-                str(audio_root),
-                "--feature-set",
-                "logmel_v1",
-                "--model-out",
-                str(tmp_path / "cnn.pt"),
-                "--metrics-out",
-                str(tmp_path / "cnn_metrics.json"),
-            ],
-            "v2 not implemented: Tiny CNN training",
-        ),
-        (
-            lambda manifest, audio_root, tmp_path: [
-                "train-v2-embedding",
-                "--manifest",
-                str(manifest),
-                "--audio-root",
-                str(audio_root),
-                "--embedding-model",
-                "yamnet",
-                "--head",
-                "logistic_regression",
-                "--model-out",
-                str(tmp_path / "yamnet_head.json"),
-                "--metrics-out",
-                str(tmp_path / "yamnet_metrics.json"),
-            ],
-            "v2 not implemented: pretrained embedding training",
-        ),
-    ],
-)
-def test_v2_train_skeleton_commands_validate_inputs_then_stop(
+def test_train_v2_mlp_cli_writes_model_and_metrics(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    argv_builder: object,
-    expected_error: str,
 ) -> None:
-    manifest = tmp_path / "public_manifest.csv"
-    audio_root = tmp_path / "audio"
-    manifest.write_text("placeholder\n", encoding="utf-8")
-    audio_root.mkdir()
+    pytest.importorskip("sklearn")
+    pytest.importorskip("joblib")
+    features = _write_feature_bundle(tmp_path / "features.npz")
+    model_out = tmp_path / "mlp.joblib"
+    metrics_out = tmp_path / "mlp_metrics.json"
 
-    exit_code = main(argv_builder(manifest, audio_root, tmp_path))
+    exit_code = main(
+        [
+            "train-v2-mlp",
+            "--features",
+            str(features),
+            "--model-out",
+            str(model_out),
+            "--metrics-out",
+            str(metrics_out),
+            "--epochs",
+            "2",
+            "--batch-size",
+            "4",
+            "--patience",
+            "2",
+            "--min-delta",
+            "0.0",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    metrics = json.loads(metrics_out.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert "trained v2b tiny mlp" in captured.out
+    assert "v2 ml progress: epoch complete model=tiny_mlp" in captured.err
+    assert metrics["early_stopping"]["epochs_requested"] == 2
+    assert len(metrics["learning_curve"]) == 2
+    assert model_out.exists()
+    assert metrics_out.exists()
+
+
+def test_train_v2_embedding_cli_reports_spec_backend_pending(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    features = _write_feature_bundle(tmp_path / "features.npz")
+    public_root = tmp_path / "public"
+    professor_root = tmp_path / "professor"
+    public_root.mkdir()
+    professor_root.mkdir()
+
+    exit_code = main(
+        [
+            "train-v2-embedding",
+            "--features",
+            str(features),
+            "--public-audio-root",
+            str(public_root),
+            "--professor-audio-root",
+            str(professor_root),
+            "--embedding-model",
+            "yamnet",
+            "--head",
+            "logistic_regression",
+            "--model-out",
+            str(tmp_path / "head.joblib"),
+            "--metrics-out",
+            str(tmp_path / "metrics.json"),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ]
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert expected_error in captured.err
+    assert "V2D pretrained embeddings are not implemented yet" in captured.err
+    assert "YAMNet, EfficientAT, VGGish, or PANNs" in captured.err
 
 
 def test_sweep_v2_ml_cli_writes_artifacts(
@@ -178,24 +185,17 @@ def test_eval_v2_cli_reports_missing_model(
     assert "v2 ml error: model does not exist" in captured.err
 
 
-def test_v2_skeleton_reports_missing_manifest_before_not_implemented(
+def test_v2_mlp_cli_reports_missing_features(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    audio_root = tmp_path / "audio"
-    audio_root.mkdir()
-
     exit_code = main(
         [
             "train-v2-mlp",
-            "--manifest",
-            str(tmp_path / "missing.csv"),
-            "--audio-root",
-            str(audio_root),
-            "--feature-set",
-            "spectral_mfcc_v1",
+            "--features",
+            str(tmp_path / "missing.npz"),
             "--model-out",
-            str(tmp_path / "mlp.pt"),
+            str(tmp_path / "mlp.joblib"),
             "--metrics-out",
             str(tmp_path / "mlp_metrics.json"),
         ]
@@ -203,29 +203,32 @@ def test_v2_skeleton_reports_missing_manifest_before_not_implemented(
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "v2 input error: manifest does not exist" in captured.err
+    assert "v2 ml error: features does not exist" in captured.err
 
 
-def test_v2_cli_rejects_unknown_feature_set(tmp_path: Path) -> None:
-    manifest = tmp_path / "manifest.csv"
-    audio_root = tmp_path / "audio"
-    manifest.write_text("placeholder\n", encoding="utf-8")
-    audio_root.mkdir()
+def test_v2_cli_rejects_unknown_embedding_model(tmp_path: Path) -> None:
+    features = _write_feature_bundle(tmp_path / "features.npz")
 
     with pytest.raises(SystemExit) as error:
         main(
             [
-                "train-v2-cnn",
-                "--manifest",
-                str(manifest),
-                "--audio-root",
-                str(audio_root),
-                "--feature-set",
-                "mel",
+                "train-v2-embedding",
+                "--features",
+                str(features),
+                "--public-audio-root",
+                str(tmp_path),
+                "--professor-audio-root",
+                str(tmp_path),
+                "--embedding-model",
+                "vggish",
+                "--head",
+                "logistic_regression",
                 "--model-out",
-                str(tmp_path / "cnn.pt"),
+                str(tmp_path / "head.joblib"),
                 "--metrics-out",
-                str(tmp_path / "cnn_metrics.json"),
+                str(tmp_path / "metrics.json"),
+                "--cache-dir",
+                str(tmp_path / "cache"),
             ]
         )
 

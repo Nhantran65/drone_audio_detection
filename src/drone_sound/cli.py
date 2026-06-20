@@ -20,12 +20,9 @@ from drone_sound.training import TrainingDataError, train_v1_baseline
 from drone_sound.v2 import (
     EMBEDDING_HEAD_MODEL_TYPES,
     ENGINEERED_FEATURE_SETS,
-    FEATURE_SETS,
     PRETRAINED_EMBEDDING_MODELS,
     V2A_MODEL_TYPES,
     V2InputError,
-    V2NotImplementedError,
-    validate_manifest_and_audio_root,
 )
 from drone_sound.v1_evaluation import V1EvaluationError, evaluate_frozen_v1_model
 
@@ -297,25 +294,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     mlp_parser = subcommands.add_parser(
         "train-v2-mlp",
-        help="Train the V2B Tiny MLP skeleton.",
+        help="Train the V2B Tiny MLP from a V2 feature bundle.",
     )
     mlp_parser.add_argument(
-        "--manifest",
+        "--features",
         required=True,
         type=Path,
-        help="Public manifest CSV containing train/val/public_test rows.",
-    )
-    mlp_parser.add_argument(
-        "--audio-root",
-        required=True,
-        type=Path,
-        help="Directory used to resolve manifest original_file paths.",
-    )
-    mlp_parser.add_argument(
-        "--feature-set",
-        required=True,
-        choices=FEATURE_SETS,
-        help="V2 feature set name.",
+        help="V2 .npz feature bundle from extract-v2-features.",
     )
     mlp_parser.add_argument(
         "--model-out",
@@ -329,28 +314,42 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Output metrics path for future V2B artifacts.",
     )
+    mlp_parser.add_argument("--epochs", type=int, default=8, help="Training epochs.")
+    mlp_parser.add_argument("--batch-size", type=int, default=4096, help="Training batch size.")
+    mlp_parser.add_argument(
+        "--patience",
+        type=int,
+        default=3,
+        help="Early stopping patience measured in epochs without validation improvement.",
+    )
+    mlp_parser.add_argument(
+        "--min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum validation F2 delta required to count as an improvement.",
+    )
 
     cnn_parser = subcommands.add_parser(
         "train-v2-cnn",
-        help="Train the V2C Tiny CNN skeleton.",
+        help="Train the V2C Tiny CNN from cached log-mel windows.",
     )
     cnn_parser.add_argument(
-        "--manifest",
+        "--features",
         required=True,
         type=Path,
-        help="Public manifest CSV containing train/val/public_test rows.",
+        help="V2 .npz feature bundle carrying row metadata.",
     )
     cnn_parser.add_argument(
-        "--audio-root",
+        "--public-audio-root",
         required=True,
         type=Path,
-        help="Directory used to resolve manifest original_file paths.",
+        help="Directory used to resolve public original_file paths.",
     )
     cnn_parser.add_argument(
-        "--feature-set",
+        "--professor-audio-root",
         required=True,
-        choices=FEATURE_SETS,
-        help="V2 feature set name.",
+        type=Path,
+        help="Directory used to resolve professor original_file paths.",
     )
     cnn_parser.add_argument(
         "--model-out",
@@ -364,22 +363,48 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Output metrics path for future V2C artifacts.",
     )
+    cnn_parser.add_argument(
+        "--cache-dir",
+        required=True,
+        type=Path,
+        help="Directory for reusable log-mel cache artifacts.",
+    )
+    cnn_parser.add_argument("--epochs", type=int, default=4, help="Training epochs.")
+    cnn_parser.add_argument("--batch-size", type=int, default=512, help="Training batch size.")
+    cnn_parser.add_argument(
+        "--patience",
+        type=int,
+        default=4,
+        help="Early stopping patience measured in epochs without validation improvement.",
+    )
+    cnn_parser.add_argument(
+        "--min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum validation F2 delta required to count as an improvement.",
+    )
 
     embedding_parser = subcommands.add_parser(
         "train-v2-embedding",
-        help="Train the V2D pretrained embedding skeleton.",
+        help="Train the V2D pretrained embedding head.",
     )
     embedding_parser.add_argument(
-        "--manifest",
+        "--features",
         required=True,
         type=Path,
-        help="Public manifest CSV containing train/val/public_test rows.",
+        help="V2 .npz feature bundle carrying row metadata.",
     )
     embedding_parser.add_argument(
-        "--audio-root",
+        "--public-audio-root",
         required=True,
         type=Path,
-        help="Directory used to resolve manifest original_file paths.",
+        help="Directory used to resolve public original_file paths.",
+    )
+    embedding_parser.add_argument(
+        "--professor-audio-root",
+        required=True,
+        type=Path,
+        help="Directory used to resolve professor original_file paths.",
     )
     embedding_parser.add_argument(
         "--embedding-model",
@@ -405,6 +430,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Output metrics path for future V2D artifacts.",
     )
+    embedding_parser.add_argument(
+        "--cache-dir",
+        required=True,
+        type=Path,
+        help="Directory for reusable pretrained embedding cache artifacts.",
+    )
+    embedding_parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size.")
+    embedding_parser.add_argument("--epochs", type=int, default=5, help="Embedding head epochs.")
 
     eval_v2_parser = subcommands.add_parser(
         "eval-v2",
@@ -597,22 +630,87 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "train-v2-mlp":
-        return _run_v2_skeleton(
-            "Tiny MLP training",
-            lambda: validate_manifest_and_audio_root(args.manifest, args.audio_root),
+        from drone_sound.v2_ml import V2MLError, train_v2_mlp
+
+        try:
+            report = train_v2_mlp(
+                args.features,
+                args.model_out,
+                args.metrics_out,
+                progress_callback=_v2_ml_progress_logger(),
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                patience=args.patience,
+                min_delta=args.min_delta,
+            )
+        except V2MLError as error:
+            print(f"v2 ml error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "trained v2b tiny mlp: "
+            f"public_test_f2={_format_metric(report['public_test']['metrics']['f2'])} "
+            f"professor_recall={_format_metric(report['professor_test']['metrics']['recall'])} "
+            f"-> {args.model_out}"
         )
+        return 0
 
     if args.command == "train-v2-cnn":
-        return _run_v2_skeleton(
-            "Tiny CNN training",
-            lambda: validate_manifest_and_audio_root(args.manifest, args.audio_root),
+        from drone_sound.v2_ml import V2MLError
+        from drone_sound.v2_torch import train_v2_cnn
+
+        try:
+            report = train_v2_cnn(
+                args.features,
+                args.public_audio_root,
+                args.professor_audio_root,
+                args.model_out,
+                args.metrics_out,
+                args.cache_dir,
+                progress_callback=_v2_ml_progress_logger(),
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                patience=args.patience,
+                min_delta=args.min_delta,
+            )
+        except V2MLError as error:
+            print(f"v2 ml error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "trained v2c tiny cnn: "
+            f"public_test_f2={_format_metric(report['public_test']['metrics']['f2'])} "
+            f"professor_recall={_format_metric(report['professor_test']['metrics']['recall'])} "
+            f"-> {args.model_out}"
         )
+        return 0
 
     if args.command == "train-v2-embedding":
-        return _run_v2_skeleton(
-            "pretrained embedding training",
-            lambda: validate_manifest_and_audio_root(args.manifest, args.audio_root),
+        from drone_sound.v2_ml import V2MLError
+        from drone_sound.v2_torch import train_v2_embedding
+
+        try:
+            report = train_v2_embedding(
+                args.features,
+                args.public_audio_root,
+                args.professor_audio_root,
+                args.embedding_model,
+                args.head,
+                args.model_out,
+                args.metrics_out,
+                args.cache_dir,
+                progress_callback=_v2_ml_progress_logger(),
+                batch_size=args.batch_size,
+                epochs=args.epochs,
+            )
+        except V2MLError as error:
+            print(f"v2 ml error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "trained v2d pretrained embedding: "
+            f"public_test_f2={_format_metric(report['public_test']['metrics']['f2'])} "
+            f"professor_recall={_format_metric(report['professor_test']['metrics']['recall'])} "
+            f"-> {args.model_out}"
         )
+        return 0
 
     if args.command == "eval-v2":
         from drone_sound.v2_ml import V2MLError, evaluate_v2_model
@@ -646,18 +744,6 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _run_v2_skeleton(capability: str, validate_inputs: Callable[[], None]) -> int:
-    try:
-        validate_inputs()
-        raise V2NotImplementedError(capability)
-    except V2InputError as error:
-        print(f"v2 input error: {error}", file=sys.stderr)
-        return 1
-    except V2NotImplementedError as error:
-        print(str(error), file=sys.stderr)
-        return 1
-
-
 def _format_metric(value: float | None) -> str:
     if value is None:
         return "n/a"
@@ -672,8 +758,73 @@ def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
         model_type = event.get("model_type", "unknown")
         event_name = event.get("event")
         if event_name == "model_start":
+            extras = []
+            for key in ("epochs", "train_rows", "batch_size", "device"):
+                if key in event:
+                    extras.append(f"{key}={event[key]}")
+            suffix = " " + " ".join(extras) if extras else ""
             print(
-                f"v2 ml progress: start model={model_type} elapsed={elapsed}",
+                f"v2 ml progress: start model={model_type} elapsed={elapsed}{suffix}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "cache_start":
+            print(
+                "v2 ml progress: "
+                f"cache start phase={event['phase']} rows={event['rows']} "
+                f"files={event['files']} elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "cache_progress":
+            eta = _format_duration(event.get("eta_seconds"))
+            current_file = Path(str(event["current_file"])).name
+            processed = int(event["processed_rows"])
+            total = int(event["total_rows"])
+            percent = (processed / total * 100.0) if total else 100.0
+            print(
+                "v2 ml progress: "
+                f"cache phase={event['phase']} {processed}/{total} rows "
+                f"({percent:.1f}%), files={event['file_index']}/{event['total_files']}, "
+                f"rate={float(event['rate']):.1f} rows/s, elapsed={elapsed}, "
+                f"eta={eta}, file={current_file}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "batch_progress":
+            print(
+                "v2 ml progress: "
+                f"model={model_type} epoch={event['epoch']}/{event['epochs']} "
+                f"batch={event['batch']}/{event['batches']} "
+                f"loss={float(event['loss']):.6f} elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "epoch_complete":
+            improved = ""
+            if "improved" in event:
+                improved = f" improved={int(bool(event['improved']))}"
+            print(
+                "v2 ml progress: "
+                f"epoch complete model={model_type} epoch={event['epoch']}/{event['epochs']} "
+                f"loss={float(event['loss']):.6f} "
+                f"validation_f2={_format_metric(event.get('validation_f2'))} "
+                f"validation_fpr={_format_metric(event.get('validation_fpr'))} "
+                f"elapsed={elapsed}{improved}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "early_stop":
+            print(
+                "v2 ml progress: "
+                f"early stop model={model_type} epoch={event['epoch']}/{event['epochs']} "
+                f"best_epoch={event.get('best_epoch')} patience={event['patience']} "
+                f"min_delta={float(event['min_delta']):.6f} elapsed={elapsed}",
                 file=sys.stderr,
                 flush=True,
             )
