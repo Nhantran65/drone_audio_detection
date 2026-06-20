@@ -18,6 +18,7 @@ from drone_sound.v2_ml import (
     V2FeatureBundle,
     V2MLError,
     _counts_for_mask,
+    _combined_supplementary_metrics,
     _early_stopping_improved,
     _false_positive_rate_by_subtype,
     _format_bytes,
@@ -34,6 +35,7 @@ from drone_sound.wav_audio import WavReadError, read_wav_mono_array
 
 V2C_TRACK = "v2c"
 LOGMEL_FEATURE_SET = "logmel_v1"
+TORCH_MODEL_SCHEMA_VERSION = "v2_torch_model_v1"
 V2C_DEFAULT_EPOCHS = 4
 V2C_DEFAULT_BATCH_SIZE = 512
 V2C_DEFAULT_PATIENCE = 4
@@ -239,7 +241,7 @@ def train_v2_cnn(
     output_model.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "schema_version": "v2_torch_model_v1",
+            "schema_version": TORCH_MODEL_SCHEMA_VERSION,
             "algorithm": "v2c_tiny_cnn",
             "model_type": "tiny_cnn",
             "track": V2C_TRACK,
@@ -271,6 +273,140 @@ def train_v2_cnn(
     return metrics
 
 
+def evaluate_v2_cnn(
+    model_path: str | Path,
+    features_path: str | Path,
+    public_audio_root: str | Path,
+    professor_audio_root: str | Path,
+    cache_dir: str | Path,
+    metrics_out: str | Path,
+    progress_callback: ProgressCallback | None = None,
+    *,
+    batch_size: int = V2C_DEFAULT_BATCH_SIZE,
+) -> dict[str, Any]:
+    """Evaluate a frozen V2C Tiny CNN checkpoint without retuning thresholds."""
+
+    if batch_size <= 0:
+        raise V2MLError("batch size must be > 0")
+    _, torch, _, _ = _require_dl_dependencies()
+    bundle = load_feature_bundle(features_path)
+    partitions = _validated_partitions(bundle)
+    cache = _logmel_cache(
+        bundle,
+        public_audio_root,
+        professor_audio_root,
+        cache_dir,
+        progress_callback,
+    )
+    device = _device(torch)
+    checkpoint_path = Path(model_path)
+    if not checkpoint_path.exists():
+        raise V2MLError(f"model does not exist: {checkpoint_path}")
+    if not checkpoint_path.is_file():
+        raise V2MLError(f"model is not a file: {checkpoint_path}")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    except Exception as error:
+        raise V2MLError(f"invalid V2C model artifact: {checkpoint_path}") from error
+    _validate_torch_checkpoint(checkpoint)
+    model = _TinyCnn(LOGMEL_BINS, LOGMEL_FRAMES).to(device)
+    model.load_state_dict(checkpoint["state_dict"])
+    threshold = float(checkpoint["threshold"])
+    model_type = str(checkpoint["model_type"])
+    track = str(checkpoint["track"])
+    algorithm = str(checkpoint["algorithm"])
+
+    public_indices = _row_indices(partitions["public_test"])
+    professor_indices = _row_indices(partitions["professor_test"])
+    started_at = time.perf_counter()
+    public_scores = _torch_scores(
+        torch,
+        model,
+        cache,
+        public_indices,
+        batch_size,
+        device,
+        progress_callback=progress_callback,
+        model_type=model_type,
+        phase="public_test",
+    )
+    elapsed = time.perf_counter() - started_at
+    public_labels = _labels_for_mask(bundle, partitions["public_test"])
+    professor_scores = _torch_scores(
+        torch,
+        model,
+        cache,
+        professor_indices,
+        batch_size,
+        device,
+        progress_callback=progress_callback,
+        model_type=model_type,
+        phase="professor_test",
+    )
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    metrics = {
+        "schema_version": "v2_eval_report_v1",
+        "algorithm": algorithm,
+        "model_type": model_type,
+        "track": track,
+        "feature_set": LOGMEL_FEATURE_SET,
+        "source_feature_bundle": str(bundle.path),
+        "feature_bundle": str(bundle.path),
+        "model_path": str(checkpoint_path),
+        "threshold": threshold,
+        "threshold_name": checkpoint["threshold_name"],
+        "thresholds": dict(checkpoint["thresholds"]),
+        "public_test": {
+            "counts": _counts_for_mask(bundle, partitions["public_test"]),
+            "metrics": _metrics(public_labels, public_scores, threshold),
+            "false_positive_rate_by_subtype": _false_positive_rate_by_subtype(
+                bundle,
+                partitions["public_test"],
+                public_scores,
+                threshold,
+            ),
+        },
+        "professor_test": {
+            "counts": _counts_for_mask(bundle, partitions["professor_test"]),
+            "metrics": _professor_metrics(bundle, partitions["professor_test"], professor_scores, threshold),
+        },
+        "combined_supplementary": _combined_supplementary_metrics(
+            bundle,
+            partitions,
+            public_scores,
+            professor_scores,
+            threshold,
+        ),
+        "efficiency": {
+            "feature_count": LOGMEL_BINS * LOGMEL_FRAMES,
+            "model_type": model_type,
+            "model_size_bytes": checkpoint_path.stat().st_size,
+            "model_size": _format_bytes(checkpoint_path.stat().st_size),
+            "parameter_count": parameter_count,
+            "tree_node_count": None,
+            "average_inference_time_sec_per_window": elapsed / max(len(public_scores), 1),
+            "runtime_dependency": "torch",
+            "deployability_label": "maybe_deployable",
+        },
+        "limitations": [
+            "Professor data is positive-only or near-positive-only evaluation data.",
+            "Professor data is not used for training, validation, threshold tuning, or model selection.",
+            "Combined supplementary metrics include positive-only professor rows and do not replace public_test.",
+        ],
+    }
+    _write_json(Path(metrics_out), metrics)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "model_complete",
+                "model_type": model_type,
+                "model_path": str(checkpoint_path),
+                "metrics_path": str(metrics_out),
+            }
+        )
+    return metrics
+
+
 def train_v2_embedding(
     features_path: str | Path,
     public_audio_root: str | Path,
@@ -285,17 +421,22 @@ def train_v2_embedding(
     batch_size: int = V2D_DEFAULT_BATCH_SIZE,
     epochs: int = V2D_DEFAULT_EPOCHS,
 ) -> dict[str, Any]:
-    """Placeholder for spec-compliant V2D pretrained audio embeddings."""
+    """Delegate V2D pretrained embeddings to the TensorFlow Hub implementation."""
 
-    if batch_size <= 0:
-        raise V2MLError("batch size must be > 0")
-    if epochs <= 0:
-        raise V2MLError("epochs must be > 0")
-    expected = "YAMNet, EfficientAT, VGGish, or PANNs"
-    raise V2MLError(
-        "V2D pretrained embeddings are not implemented yet; "
-        f"the spec-preferred backends are {expected}. "
-        f"requested embedding_model={embedding_model}, head={head}"
+    from drone_sound.v2_embedding import train_v2_embedding as train_embedding
+
+    return train_embedding(
+        features_path,
+        public_audio_root,
+        professor_audio_root,
+        embedding_model,
+        head,
+        model_out,
+        metrics_out,
+        cache_dir,
+        progress_callback=progress_callback,
+        batch_size=batch_size,
+        epochs=epochs,
     )
 
 
@@ -339,6 +480,15 @@ def _logmel_cache(
     if cache_path.exists() and meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         if tuple(meta.get("shape", ())) == expected_shape:
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "cache_reuse",
+                        "phase": LOGMEL_FEATURE_SET,
+                        "rows": bundle.row_count,
+                        "cache_path": str(cache_path),
+                    }
+                )
             return np.load(cache_path, mmap_mode="r")
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     matrix = np.lib.format.open_memmap(
@@ -605,6 +755,13 @@ def _metrics_report(
             "counts": _counts_for_mask(bundle, partitions["professor_test"]),
             "metrics": _professor_metrics(bundle, partitions["professor_test"], professor_scores, threshold),
         },
+        "combined_supplementary": _combined_supplementary_metrics(
+            bundle,
+            partitions,
+            public_scores,
+            professor_scores,
+            threshold,
+        ),
         "efficiency": {
             "feature_count": feature_count,
             "model_type": model_type,
@@ -635,16 +792,96 @@ def _torch_scores(
     indices: Sequence[int],
     batch_size: int,
     device: Any,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    model_type: str = "tiny_cnn",
+    phase: str = "eval",
 ) -> list[float]:
     model.eval()
     scores: list[float] = []
+    total = len(indices)
+    started_at = time.perf_counter()
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "eval_start",
+                "model_type": model_type,
+                "phase": phase,
+                "total_rows": total,
+                "batch_size": batch_size,
+            }
+        )
     with torch.inference_mode():
         for start in range(0, len(indices), batch_size):
             batch_indices = indices[start : start + batch_size]
             x = _torch_logmel_batch(torch, cache, batch_indices, device)
             logits = model(x).reshape(-1)
             scores.extend(torch.sigmoid(logits).detach().cpu().tolist())
+            processed = min(start + batch_size, total)
+            if progress_callback is not None and (
+                processed == total
+                or processed == len(batch_indices)
+                or processed % (batch_size * 5) == 0
+            ):
+                elapsed = max(time.perf_counter() - started_at, 0.0)
+                rate = processed / elapsed if elapsed else 0.0
+                eta = (total - processed) / rate if rate > 0 else None
+                progress_callback(
+                    {
+                        "event": "eval_progress",
+                        "model_type": model_type,
+                        "phase": phase,
+                        "processed_rows": processed,
+                        "total_rows": total,
+                        "rate": rate,
+                        "eta_seconds": eta,
+                    }
+                )
+    elapsed = max(time.perf_counter() - started_at, 0.0)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "eval_complete",
+                "model_type": model_type,
+                "phase": phase,
+                "total_rows": total,
+                "rate": total / elapsed if elapsed else 0.0,
+            }
+        )
     return [float(value) for value in scores]
+
+
+def _validate_torch_checkpoint(checkpoint: Any) -> None:
+    if not isinstance(checkpoint, dict):
+        raise V2MLError("V2C model artifact must contain a checkpoint object")
+    required = (
+        "schema_version",
+        "algorithm",
+        "model_type",
+        "track",
+        "feature_set",
+        "input_shape",
+        "threshold",
+        "threshold_name",
+        "thresholds",
+        "state_dict",
+        "labels",
+    )
+    missing = [key for key in required if key not in checkpoint]
+    if missing:
+        raise V2MLError(f"V2C model artifact missing keys: {', '.join(missing)}")
+    if checkpoint["schema_version"] != TORCH_MODEL_SCHEMA_VERSION:
+        raise V2MLError(f"unsupported V2C model schema: {checkpoint['schema_version']}")
+    if checkpoint["algorithm"] != "v2c_tiny_cnn":
+        raise V2MLError(f"unsupported V2C model algorithm: {checkpoint['algorithm']}")
+    if checkpoint["model_type"] != "tiny_cnn":
+        raise V2MLError("V2C model_type must be tiny_cnn")
+    if checkpoint["track"] != V2C_TRACK:
+        raise V2MLError("V2C track must be v2c")
+    if checkpoint["feature_set"] != LOGMEL_FEATURE_SET:
+        raise V2MLError(f"V2C feature_set must be {LOGMEL_FEATURE_SET}")
+    if checkpoint["threshold_name"] != PRIMARY_THRESHOLD_NAME:
+        raise V2MLError("V2C model threshold_name must be threshold_f2")
 
 
 def _torch_logmel_batch(torch: Any, cache: Any, indices: Sequence[int], device: Any) -> Any:

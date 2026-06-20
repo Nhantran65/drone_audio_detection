@@ -2,7 +2,7 @@
 
 ## Status
 
-partial
+changed
 
 ## Lane
 
@@ -16,8 +16,8 @@ V2A classical ML sweep:
 - V2B Tiny MLP on the existing `spectral_mfcc_v1` feature bundle.
 - V2C Tiny CNN on `logmel_v1` windows.
 
-V2D remains pending. It must use a spec-compliant pretrained audio embedding
-family such as YAMNet, EfficientAT, VGGish, or PANNs. The prior non-spec
+V2D is split into follow-up story `US-013`, which implements the
+spec-compliant YAMNet pretrained embedding baseline. The prior non-spec
 reference run was removed.
 
 Professor rows remain evaluation-only and cannot affect training, threshold
@@ -36,8 +36,8 @@ tuning, or model selection.
   frozen model plus metrics JSON.
 - `train-v2-cnn` trains a V2C Tiny CNN from public/professor manifests and
   writes a frozen model plus metrics JSON.
-- `train-v2-embedding` does not run until a spec-compliant V2D backend is
-  implemented.
+- `train-v2-embedding` is implemented by `US-013` with YAMNet and Logistic
+  Regression head.
 - Long-running extraction/training/evaluation steps print progress with elapsed
   time, counts, and current phase/model.
 - Validation thresholds are selected only from public `val` rows.
@@ -78,5 +78,10 @@ Story `US-010` is registered in the durable Harness database with verify command
   `artifacts/models/v2_full_comparison/comparison.json` and
   `artifacts/models/v2_full_comparison/comparison.csv`.
 - Cleanup note: non-spec V2D code, docs, artifacts, and comparison rows were
-  removed. Next V2D work must follow the SPEC-preferred embedding families
-  before it can be marked implemented.
+  removed. Spec-compliant V2D YAMNet work is tracked and implemented in
+  `US-013`.
+- US-013 completion note: real GPU-backed YAMNet V2D run wrote
+  `artifacts/models/v2d_yamnet/yamnet_head_metrics.json` and added
+  `yamnet_head` to V2 comparison artifacts with public F2 0.974435,
+  public FPR 0.041888, professor recall 0.619946, and deployability
+  `reference_only`.

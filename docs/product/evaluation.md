@@ -49,6 +49,17 @@ Allowed metrics:
 Do not use professor data alone to report false positive rate, specificity,
 accuracy, or precision unless real-world no-drone professor data is added.
 
+## Combined Supplementary Evaluation
+
+Combined public-test plus professor-positive metrics are supplementary only.
+They may be reported for communication, but they do not replace the public
+held-out test benchmark, and they must not be used for threshold tuning or model
+selection.
+
+The combined supplementary block reports the same binary metrics as public
+test, using public-test rows plus professor rows and the frozen stored
+threshold.
+
 ## Threshold Rule
 
 Thresholds must be selected with validation data only. Professor data must not
@@ -113,7 +124,7 @@ inference time.
 
 ## V2 Frozen Evaluation Tool
 
-`eval-v2` evaluates an already-trained V2A joblib model package from a V2
+`eval-v2` evaluates an already-trained V2A/V2B joblib model package from a V2
 feature bundle without retraining or changing the stored `threshold_f2`:
 
 ```text
@@ -126,6 +137,27 @@ python -m drone_sound.cli eval-v2 \
 
 The feature bundle must include public test and professor rows plus eval
 metadata. Professor rows remain positive-only evaluation data.
+
+`eval-v2-cnn` does the same for frozen V2C `.pt` checkpoints using the reusable
+log-mel cache. `eval-v2-embedding` does the same for frozen V2D YAMNet joblib
+heads using the reusable pretrained embedding cache. Neither command retrains
+the model or retunes thresholds.
+
+`eval-v2-cnn` evaluates an already-trained V2C Tiny CNN checkpoint from the same
+feature bundle and log-mel cache:
+
+```text
+python -m drone_sound.cli eval-v2-cnn \
+  --model artifacts/models/v2c_cnn/tiny_cnn_es.pt \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --public-audio-root data/raw/public \
+  --professor-audio-root data/raw/private/professor_real_world \
+  --cache-dir artifacts/features/v2_logmel_cache \
+  --metrics-out artifacts/models/v2_combined_supplementary/tiny_cnn_es_combined_eval.json
+```
+
+Both frozen V2 evaluators write a `combined_supplementary` block for
+public-test plus professor-positive metrics.
 
 ## V2.1 Comparison Output
 

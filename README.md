@@ -55,6 +55,12 @@ V2 classical ML tests require the optional ML dependencies:
 uv run --extra data --extra ml --with pytest --python 3.13 python -m pytest
 ```
 
+V2D YAMNet embedding tests require the optional embedding dependencies:
+
+```bash
+uv run --extra data --extra ml --extra embedding --with pytest --python 3.13 python -m pytest
+```
+
 ## V1 Training Smoke Baseline
 
 Convert NASA MAT files into derived WAV files first, then build the local public
@@ -124,8 +130,9 @@ environment does not already have the optional dependencies installed.
 ## V2B/V2C/V2D Experiment Tracks
 
 After `spectral_mfcc_v1` extraction and V2A, the remaining V2 tracks can be
-run from the same feature bundle. Tiny MLP uses `data` plus `ml`; Tiny CNN and
-pretrained embeddings also require the optional `dl` extra.
+run from the same feature bundle. Tiny MLP uses `data` plus `ml`; Tiny CNN
+requires the optional `dl` extra; V2D YAMNet embeddings require `data`, `ml`,
+and `embedding`.
 
 ```bash
 python -m drone_sound.cli train-v2-mlp \
@@ -150,14 +157,70 @@ python -m drone_sound.cli train-v2-cnn \
   --min-delta 0.0005
 ```
 
-V2D remains pending until a spec-compliant pretrained audio embedding backend
-is implemented. Use YAMNet, EfficientAT, VGGish, or PANNs for that track; do
-not substitute an unrelated pretrained backend without updating the spec first.
+```bash
+python -m drone_sound.cli train-v2-embedding \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --public-audio-root data/raw/public \
+  --professor-audio-root data/raw/private/professor_real_world \
+  --embedding-model yamnet \
+  --head logistic_regression \
+  --model-out artifacts/models/v2d_yamnet/yamnet_head.joblib \
+  --metrics-out artifacts/models/v2d_yamnet/yamnet_head_metrics.json \
+  --cache-dir artifacts/features/v2_yamnet_cache
+```
+
+With `uv`, run V2D on GPU by exposing the CUDA wheel libraries and selecting
+the least-busy GPU:
+
+```bash
+TF_CUDA_LIBS=$(uv run --extra embedding --python 3.13 python - <<'PY'
+import glob, site
+paths = []
+for root in site.getsitepackages():
+    paths.extend(sorted(glob.glob(root + "/nvidia/*/lib")))
+print(":".join(paths))
+PY
+)
+CUDA_VISIBLE_DEVICES=1 LD_LIBRARY_PATH="$TF_CUDA_LIBS:${LD_LIBRARY_PATH:-}" \
+  uv run --extra data --extra ml --extra embedding --python 3.13 \
+  python -m drone_sound.cli train-v2-embedding ...
+```
+
+YAMNet is the first spec-compliant V2D backend. V2D remains `reference_only`
+unless a later deployment story proves the full pretrained extractor is
+lightweight enough for the edge target.
 
 The combined V1/V2 comparison artifacts are written under
 `artifacts/models/v2_full_comparison/`. V2B/V2C metrics include
 `learning_curve` and `early_stopping` blocks when trained with the current
 commands.
+
+Combined public-test plus professor-positive metrics are supplementary. Recompute
+them from frozen models without retraining or retuning thresholds:
+
+```bash
+python -m drone_sound.cli eval-v2 \
+  --model artifacts/models/v2b_mlp/tiny_mlp_es.joblib \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --metrics-out artifacts/models/v2_combined_supplementary/tiny_mlp_es_combined_eval.json
+```
+
+```bash
+python -m drone_sound.cli eval-v2-cnn \
+  --model artifacts/models/v2c_cnn/tiny_cnn_es.pt \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --public-audio-root data/raw/public \
+  --professor-audio-root data/raw/private/professor_real_world \
+  --cache-dir artifacts/features/v2_logmel_cache \
+  --metrics-out artifacts/models/v2_combined_supplementary/tiny_cnn_es_combined_eval.json
+```
+
+```bash
+python -m drone_sound.cli eval-v2-embedding \
+  --model artifacts/models/v2d_yamnet/yamnet_head.joblib \
+  --features artifacts/features/v2_spectral_mfcc_features.npz \
+  --metrics-out artifacts/models/v2_combined_supplementary/yamnet_head_combined_eval.json
+```
 
 ## V1 Frozen Model Evaluation
 

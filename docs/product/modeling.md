@@ -5,8 +5,10 @@
 - Research and training stack: PyTorch.
 - V2A classical ML stack: optional scikit-learn plus joblib under the `ml`
   dependency extra.
-- V2C/V2D stack: optional PyTorch plus torchaudio under the `dl` dependency
-  extra.
+- V2C stack: optional PyTorch plus torchaudio under the `dl` dependency extra.
+- V2D YAMNet stack: optional TensorFlow plus TensorFlow Hub under the
+  `embedding` dependency extra, with scikit-learn/joblib under `ml` for the
+  classifier head.
 - Edge export direction: ONNX first.
 - TensorFlow Lite may be considered later if target hardware requires it.
 
@@ -46,6 +48,8 @@ V2D answers whether transfer learning helps, but it does not automatically
 become the reportable lightweight model if the full backbone is too heavy.
 V2D must follow the spec-preferred pretrained audio embedding families:
 YAMNet, EfficientAT, VGGish, or PANNs.
+US-013 implements YAMNet first by mean-pooling the 1024-dimensional pretrained
+embedding over each 1-second window and training a Logistic Regression head.
 
 V2B and V2C training keeps the best validation checkpoint and can stop early
 with `patience`/`min_delta`. Metrics JSON stores the epoch-level learning curve

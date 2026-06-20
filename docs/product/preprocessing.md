@@ -69,7 +69,7 @@ V2.1 keeps `v1_basic` for compatibility and adds richer planned feature sets:
 | `mfcc_v1` | 13 or 20 MFCC coefficients, mean/std, optional delta mean/std | Engineered-feature models |
 | `spectral_mfcc_v1` | `v1_basic` + `spectral_v1` + `mfcc_v1` | V2A classical ML and V2B Tiny MLP |
 | `logmel_v1` | 64 mel bins, 1-second window, about 100 frames | V2C Tiny CNN |
-| `pretrained_embedding_v1` | YAMNet/EfficientAT/VGGish/PANNs embedding | V2D reference baseline |
+| `pretrained_embedding_v1` | YAMNet mean-pooled 1024-dimensional embedding, with EfficientAT/VGGish/PANNs still allowed by future spec updates | V2D reference baseline |
 
 Feature extraction must be deterministic. Scalers must be fit on train split
 only, then reused unchanged for validation, public test, and professor test.
@@ -105,3 +105,9 @@ DCT-II, and mean/std plus delta mean/std summaries across frames.
   `window_end_sec`.
 - Progress logs every 5,000 rows by default; override with `--progress-every N`
   or use `--progress-every 0` to disable row progress logs.
+
+V2D embeddings are extracted from the same feature bundle metadata rather than
+from `extract-v2-features`. The YAMNet path reads each referenced 1-second
+window, standardizes it to mono 16 kHz, runs the pretrained TensorFlow Hub
+extractor, mean-pools frame embeddings, and caches the resulting
+`pretrained_embedding_v1` matrix for reuse.

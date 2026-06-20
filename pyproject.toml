@@ -20,6 +20,10 @@ dl = [
     "torch>=2.12",
     "torchaudio>=2.11",
 ]
+embedding = [
+    "tensorflow[and-cuda]>=2.21",
+    "tensorflow-hub>=0.16.1",
+]
 dev = [
     "pytest>=8.0",
 ]

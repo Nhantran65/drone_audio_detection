@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import wave
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,14 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("sklearn")
 pytest.importorskip("joblib")
 
+from drone_sound import v2_embedding
 from drone_sound.training import NEGATIVE_LABEL, POSITIVE_LABEL, _metrics
 from drone_sound.v2 import THRESHOLD_NAMES
+from drone_sound.v2_embedding import evaluate_v2_embedding, train_v2_embedding
 from drone_sound.v2_ml import (
     V2MLError,
     evaluate_v2_model,
+    _combined_supplementary_metrics,
     load_feature_bundle,
     run_v2a_sweep,
     select_thresholds,
@@ -105,8 +109,37 @@ def test_eval_v2_reuses_frozen_threshold_and_exports_errors(tmp_path: Path) -> N
     assert stored_metrics["threshold"] == report["threshold"]
     assert report["public_test"]["metrics"]["rows"] == 4
     assert report["professor_test"]["metrics"]["rows"] == 3
+    assert report["combined_supplementary"]["supplementary"] is True
+    assert report["combined_supplementary"]["counts"] == {"drone": 5, "no_drone": 2}
+    assert report["combined_supplementary"]["metrics"]["rows"] == 7
+    assert stored_metrics["combined_supplementary"]["metrics"]["threshold"] == report["threshold"]
     assert (errors_out / "public_false_positives.csv").exists()
     assert (errors_out / "professor_missed_windows.csv").exists()
+
+
+def test_combined_supplementary_metrics_uses_public_and_professor_scores(tmp_path: Path) -> None:
+    features = _write_feature_bundle(tmp_path / "features.npz")
+    bundle = load_feature_bundle(features)
+    from drone_sound.v2_ml import _validated_partitions
+
+    partitions = _validated_partitions(bundle)
+    metrics = _combined_supplementary_metrics(
+        bundle,
+        partitions,
+        public_scores=[0.9, 0.8, 0.2, 0.1],
+        professor_scores=[0.7, 0.6, 0.4],
+        threshold=0.5,
+    )
+
+    assert metrics["supplementary"] is True
+    assert metrics["counts"] == {"drone": 5, "no_drone": 2}
+    assert metrics["metrics"]["rows"] == 7
+    assert metrics["metrics"]["confusion_matrix"] == {
+        "tp": 4,
+        "tn": 2,
+        "fp": 0,
+        "fn": 1,
+    }
 
 
 def test_train_v2_mlp_writes_frozen_model_and_metrics(tmp_path: Path) -> None:
@@ -128,10 +161,88 @@ def test_train_v2_mlp_writes_frozen_model_and_metrics(tmp_path: Path) -> None:
     assert report["track"] == "v2b"
     assert stored["threshold_name"] == "threshold_f2"
     assert stored["selection"]["uses_professor_data"] is False
+    assert stored["combined_supplementary"]["counts"] == {"drone": 5, "no_drone": 2}
     assert stored["early_stopping"]["enabled"] is True
     assert stored["early_stopping"]["epochs_requested"] == 2
     assert len(stored["learning_curve"]) == stored["early_stopping"]["epochs_ran"]
     assert model_out.exists()
+
+
+def test_train_v2_embedding_reuses_cache_and_keeps_professor_eval_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    features = _write_feature_bundle(tmp_path / "features.npz")
+    public_root = tmp_path / "public"
+    professor_root = tmp_path / "professor"
+    public_root.mkdir()
+    professor_root.mkdir()
+    _write_audio_files_for_bundle(features, public_root, professor_root)
+    load_count = 0
+
+    def fake_loader() -> object:
+        nonlocal load_count
+        load_count += 1
+        return _fake_embedder
+
+    monkeypatch.setattr(v2_embedding, "_load_yamnet_embedder", fake_loader)
+    first = train_v2_embedding(
+        features,
+        public_root,
+        professor_root,
+        "yamnet",
+        "logistic_regression",
+        tmp_path / "models" / "yamnet_head.joblib",
+        tmp_path / "metrics" / "yamnet_head.json",
+        tmp_path / "cache",
+        batch_size=4,
+        epochs=2,
+    )
+
+    def fail_loader() -> object:
+        raise AssertionError("cache reuse should not load YAMNet")
+
+    monkeypatch.setattr(v2_embedding, "_load_yamnet_embedder", fail_loader)
+    second = train_v2_embedding(
+        features,
+        public_root,
+        professor_root,
+        "yamnet",
+        "logistic_regression",
+        tmp_path / "models" / "yamnet_head_cached.joblib",
+        tmp_path / "metrics" / "yamnet_head_cached.json",
+        tmp_path / "cache",
+        batch_size=4,
+        epochs=2,
+    )
+
+    stored = json.loads((tmp_path / "metrics" / "yamnet_head_cached.json").read_text(encoding="utf-8"))
+    assert load_count == 1
+    assert first["embedding"]["reused"] is False
+    assert second["embedding"]["reused"] is True
+    assert stored["training"]["counts"] == {"drone": 3, "no_drone": 3}
+    assert stored["validation"]["counts"] == {"drone": 2, "no_drone": 2}
+    assert stored["professor_test"]["counts"] == {"drone": 3, "no_drone": 0}
+    assert stored["selection"]["uses_professor_data"] is False
+    assert stored["feature_set"] == "pretrained_embedding_v1"
+    assert stored["model_type"] == "yamnet_head"
+    assert stored["efficiency"]["deployability_label"] == "reference_only"
+
+    eval_out = tmp_path / "eval" / "yamnet_head_eval.json"
+    eval_report = evaluate_v2_embedding(
+        tmp_path / "models" / "yamnet_head_cached.joblib",
+        features,
+        eval_out,
+        batch_size=4,
+    )
+    eval_stored = json.loads(eval_out.read_text(encoding="utf-8"))
+    assert eval_report["threshold"] == stored["threshold"]
+    assert eval_stored["threshold_name"] == "threshold_f2"
+    assert eval_stored["public_test"]["metrics"]["rows"] == 4
+    assert eval_stored["professor_test"]["metrics"]["rows"] == 3
+    assert eval_stored["combined_supplementary"]["supplementary"] is True
+    assert eval_stored["combined_supplementary"]["counts"] == {"drone": 5, "no_drone": 2}
+    assert eval_stored["selection"]["uses_professor_data"] is False
 
 
 def test_missing_feature_bundle_reports_clear_error(tmp_path: Path) -> None:
@@ -195,8 +306,8 @@ def _write_feature_bundle(path: Path) -> Path:
         label_subtypes=np.asarray(
             ["drone_unknown_condition" if row[2] else _subtype(row[1]) for row in rows]
         ),
-        window_start_sec=np.asarray([float(index) for index in range(len(rows))]),
-        window_end_sec=np.asarray([float(index + 1) for index in range(len(rows))]),
+        window_start_sec=np.asarray([0.0 for _ in rows]),
+        window_end_sec=np.asarray([1.0 for _ in rows]),
         is_professor_data=np.asarray([row[2] for row in rows], dtype=bool),
         feature_names=np.asarray(["f0", "f1"]),
         feature_set=np.asarray("spectral_mfcc_v1"),
@@ -208,3 +319,34 @@ def _subtype(label: str) -> str:
     if label == POSITIVE_LABEL:
         return "drone_field"
     return "no_drone_background"
+
+
+def _write_audio_files_for_bundle(features: Path, public_root: Path, professor_root: Path) -> None:
+    with np.load(features, allow_pickle=False) as data:
+        for original_file, is_professor, label in zip(
+            data["original_files"],
+            data["is_professor_data"],
+            data["labels"],
+        ):
+            root = professor_root if bool(is_professor) else public_root
+            level = 0.65 if str(label) == POSITIVE_LABEL else -0.65
+            _write_fixture_wav(root / str(original_file), level)
+
+
+def _write_fixture_wav(path: Path, level: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    samples = np.full(16_000, level, dtype=np.float32)
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16_000)
+        handle.writeframes(pcm.tobytes())
+
+
+def _fake_embedder(window: object) -> object:
+    values = np.asarray(window, dtype=np.float32)
+    return np.asarray(
+        [values.mean(), values.std(), abs(values.mean()), 1.0],
+        dtype=np.float32,
+    )

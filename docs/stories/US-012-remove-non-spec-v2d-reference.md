@@ -30,7 +30,8 @@ artifacts without an explicit product/spec update first.
 - Comparison artifacts no longer include non-spec V2D rows.
 - Non-spec V2D model/cache artifacts are deleted from local artifacts.
 - Docs and stories state that V2D remains pending until a spec-compliant
-  pretrained audio embedding backend is implemented.
+  pretrained audio embedding backend is implemented. This condition is
+  superseded by `US-013`, which implements YAMNet.
 - Future V2D work is explicitly noted as SPEC-first.
 
 ## Validation
@@ -61,6 +62,6 @@ When updating durable proof status, use numeric booleans:
 
 ## SPEC Note
 
-Next V2D work must start from the SPEC and use a SPEC-preferred pretrained
-audio embedding family. If a different backend is desired, update product/spec
-docs first and only then implement it.
+Follow-up V2D work started from the SPEC-preferred YAMNet family in `US-013`.
+If a different backend is desired later, update product/spec docs first and
+only then implement it.

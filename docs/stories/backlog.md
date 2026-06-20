@@ -18,9 +18,10 @@ or when a product decision needs a durable place to land.
 | V2-M2 classical ML sweep | Train at least three V2A classical ML candidates on `spectral_mfcc_v1` and generate comparison artifacts | implemented as US-009 |
 | V2-M3 tiny MLP | Train and evaluate V2B Tiny MLP on engineered features, including parameter count and model size | implemented as US-010 |
 | V2-M4 tiny CNN | Implement `logmel_v1`, train V2C Tiny CNN, and evaluate frozen public/professor metrics | implemented as US-010 |
-| V2-M5 pretrained embedding | Evaluate at least one spec-compliant V2D pretrained embedding baseline, recommended first YAMNet, as reference-only unless deployable | pending |
-| V2-M6 unified comparison | Generate V1 vs implemented V2 comparison table and select the leading candidate with deployability label | implemented for V2A/V2B/V2C as US-010 |
+| V2-M5 pretrained embedding | Evaluate at least one spec-compliant V2D pretrained embedding baseline, recommended first YAMNet, as reference-only unless deployable | in progress as US-013 |
+| V2-M6 unified comparison | Generate V1 vs implemented V2 comparison table and select the leading candidate with deployability label | implemented for V2A/V2B/V2C as US-010; V2D row pending US-013 proof |
 | V2-M6a early-stopping rerun | Add validation early stopping and rerun V2B/V2C for 10-20 epochs with learning curves | implemented as US-011 |
+| V2-M6b combined supplementary metrics | Recompute public+professor combined metrics from frozen V2 models without retraining or threshold retuning | in progress as US-014 |
 | V2-M7 error analysis | Export missed professor windows, public false positives, score quantiles, and error analysis JSON | candidate |
 | V2-M8 report candidate | Freeze final V2 candidate, threshold, metrics, limitations, and professor-report summary | candidate |
 

@@ -63,6 +63,10 @@ yamnet_head
 
 V2D must use the spec-preferred pretrained audio embedding families above. Do
 not substitute unrelated pretrained backbones without an explicit spec update.
+US-013 implements YAMNet first. For each 1-second window, the command
+standardizes audio to 16 kHz mono, runs the TensorFlow Hub YAMNet extractor,
+mean-pools the 1024-dimensional frame embeddings, caches them as
+`pretrained_embedding_v1`, and trains a small Logistic Regression head.
 
 Implemented V2-M1 engineered dimensions:
 
@@ -146,6 +150,9 @@ Professor positive-only evaluation reports:
 - Score quantiles.
 
 Combined public-test plus professor-positive metrics are supplementary only.
+For V2, `eval-v2`, `eval-v2-cnn`, and `eval-v2-embedding` write a
+`combined_supplementary` block from frozen public/professor scores without
+retraining or threshold retuning.
 
 Efficiency reporting for every candidate:
 
@@ -175,6 +182,31 @@ Current full-data rerun artifacts:
 
 Neither run stopped before the 20-epoch cap, so the curves are near plateau but
 not flat enough to trigger early stopping under `min_delta=0.0005`.
+
+## V2D YAMNet Embedding Baseline
+
+`train-v2-embedding` implements the first spec-compliant V2D backend with:
+
+```text
+--embedding-model yamnet
+--head logistic_regression
+```
+
+The command reads row metadata from the existing V2 feature bundle, caches
+YAMNet embeddings under the requested cache directory, trains only on public
+`train` rows, tunes thresholds only on public `val` rows, and evaluates public
+test plus positive-only professor rows with the frozen `threshold_f2`.
+
+YAMNet V2D metrics use `feature_set=pretrained_embedding_v1` and
+`model_type=yamnet_head`. The deployability label is `reference_only` unless a
+later deployment story proves the full pretrained extractor plus head meets
+the lightweight target.
+
+Current full-data YAMNet artifact:
+
+- `artifacts/models/v2d_yamnet/yamnet_head_metrics.json`: public F2 0.974435,
+  public FPR 0.041888, professor recall 0.619946, longest missed professor
+  segment 12.0s, deployability `reference_only`.
 
 ## Stop Criteria
 

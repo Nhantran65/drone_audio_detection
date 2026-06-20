@@ -467,6 +467,72 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional output directory for future V2 error analysis artifacts.",
     )
 
+    eval_v2_cnn_parser = subcommands.add_parser(
+        "eval-v2-cnn",
+        help="Evaluate a frozen V2C Tiny CNN checkpoint from cached log-mel windows.",
+    )
+    eval_v2_cnn_parser.add_argument(
+        "--model",
+        required=True,
+        type=Path,
+        help="Frozen V2C model checkpoint path.",
+    )
+    eval_v2_cnn_parser.add_argument(
+        "--features",
+        required=True,
+        type=Path,
+        help="V2 .npz feature bundle carrying row metadata.",
+    )
+    eval_v2_cnn_parser.add_argument(
+        "--public-audio-root",
+        required=True,
+        type=Path,
+        help="Directory used to resolve public original_file paths.",
+    )
+    eval_v2_cnn_parser.add_argument(
+        "--professor-audio-root",
+        required=True,
+        type=Path,
+        help="Directory used to resolve professor original_file paths.",
+    )
+    eval_v2_cnn_parser.add_argument(
+        "--cache-dir",
+        required=True,
+        type=Path,
+        help="Directory for reusable log-mel cache artifacts.",
+    )
+    eval_v2_cnn_parser.add_argument(
+        "--metrics-out",
+        required=True,
+        type=Path,
+        help="Output V2C evaluation metrics report path.",
+    )
+    eval_v2_cnn_parser.add_argument("--batch-size", type=int, default=512, help="Evaluation batch size.")
+
+    eval_v2_embedding_parser = subcommands.add_parser(
+        "eval-v2-embedding",
+        help="Evaluate a frozen V2D pretrained embedding head from its cached embeddings.",
+    )
+    eval_v2_embedding_parser.add_argument(
+        "--model",
+        required=True,
+        type=Path,
+        help="Frozen V2D joblib model path.",
+    )
+    eval_v2_embedding_parser.add_argument(
+        "--features",
+        required=True,
+        type=Path,
+        help="V2 .npz feature bundle used to validate cached embedding rows.",
+    )
+    eval_v2_embedding_parser.add_argument(
+        "--metrics-out",
+        required=True,
+        type=Path,
+        help="Output V2D evaluation metrics report path.",
+    )
+    eval_v2_embedding_parser.add_argument("--batch-size", type=int, default=8192, help="Evaluation batch size.")
+
     return parser
 
 
@@ -684,8 +750,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "train-v2-embedding":
+        from drone_sound.v2_embedding import train_v2_embedding
         from drone_sound.v2_ml import V2MLError
-        from drone_sound.v2_torch import train_v2_embedding
 
         try:
             report = train_v2_embedding(
@@ -721,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.features,
                 args.metrics_out,
                 args.export_errors,
+                progress_callback=_v2_ml_progress_logger(),
             )
         except V2MLError as error:
             print(f"v2 ml error: {error}", file=sys.stderr)
@@ -735,6 +802,69 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             "evaluated frozen v2 model: "
+            f"public_test_f2={_format_metric(public_f2)}"
+            f"{professor_fragment} -> {args.metrics_out}"
+        )
+        return 0
+
+    if args.command == "eval-v2-cnn":
+        from drone_sound.v2_ml import V2MLError
+        from drone_sound.v2_torch import evaluate_v2_cnn
+
+        try:
+            report = evaluate_v2_cnn(
+                args.model,
+                args.features,
+                args.public_audio_root,
+                args.professor_audio_root,
+                args.cache_dir,
+                args.metrics_out,
+                progress_callback=_v2_ml_progress_logger(),
+                batch_size=args.batch_size,
+            )
+        except V2MLError as error:
+            print(f"v2 ml error: {error}", file=sys.stderr)
+            return 1
+        public_f2 = report["public_test"]["metrics"]["f2"]
+        professor_metrics = report["professor_test"]["metrics"] or {}
+        professor_recall = professor_metrics.get("recall")
+        professor_fragment = (
+            f" professor_recall={professor_recall:.6f}"
+            if professor_recall is not None
+            else ""
+        )
+        print(
+            "evaluated frozen v2c model: "
+            f"public_test_f2={_format_metric(public_f2)}"
+            f"{professor_fragment} -> {args.metrics_out}"
+        )
+        return 0
+
+    if args.command == "eval-v2-embedding":
+        from drone_sound.v2_embedding import evaluate_v2_embedding
+        from drone_sound.v2_ml import V2MLError
+
+        try:
+            report = evaluate_v2_embedding(
+                args.model,
+                args.features,
+                args.metrics_out,
+                progress_callback=_v2_ml_progress_logger(),
+                batch_size=args.batch_size,
+            )
+        except V2MLError as error:
+            print(f"v2 ml error: {error}", file=sys.stderr)
+            return 1
+        public_f2 = report["public_test"]["metrics"]["f2"]
+        professor_metrics = report["professor_test"]["metrics"] or {}
+        professor_recall = professor_metrics.get("recall")
+        professor_fragment = (
+            f" professor_recall={professor_recall:.6f}"
+            if professor_recall is not None
+            else ""
+        )
+        print(
+            "evaluated frozen v2d embedding model: "
             f"public_test_f2={_format_metric(public_f2)}"
             f"{professor_fragment} -> {args.metrics_out}"
         )
@@ -769,6 +899,40 @@ def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
                 flush=True,
             )
             return
+        if event_name == "eval_start":
+            print(
+                "v2 ml progress: "
+                f"eval start model={model_type} phase={event['phase']} "
+                f"rows={event['total_rows']} batch_size={event['batch_size']} "
+                f"elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "eval_progress":
+            eta = _format_duration(event.get("eta_seconds"))
+            processed = int(event["processed_rows"])
+            total = int(event["total_rows"])
+            percent = (processed / total * 100.0) if total else 100.0
+            print(
+                "v2 ml progress: "
+                f"eval model={model_type} phase={event['phase']} "
+                f"{processed}/{total} rows ({percent:.1f}%), "
+                f"rate={float(event['rate']):.1f} rows/s, elapsed={elapsed}, eta={eta}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "eval_complete":
+            print(
+                "v2 ml progress: "
+                f"eval complete model={model_type} phase={event['phase']} "
+                f"rows={event['total_rows']} rate={float(event['rate']):.1f} rows/s "
+                f"elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
         if event_name == "cache_start":
             print(
                 "v2 ml progress: "
@@ -790,6 +954,15 @@ def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
                 f"({percent:.1f}%), files={event['file_index']}/{event['total_files']}, "
                 f"rate={float(event['rate']):.1f} rows/s, elapsed={elapsed}, "
                 f"eta={eta}, file={current_file}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "cache_reuse":
+            print(
+                "v2 ml progress: "
+                f"cache reuse phase={event['phase']} rows={event['rows']} "
+                f"elapsed={elapsed} cache={event['cache_path']}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -825,6 +998,15 @@ def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
                 f"early stop model={model_type} epoch={event['epoch']}/{event['epochs']} "
                 f"best_epoch={event.get('best_epoch')} patience={event['patience']} "
                 f"min_delta={float(event['min_delta']):.6f} elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name == "model_fit_start":
+            print(
+                "v2 ml progress: "
+                f"fit start model={model_type} train_rows={event['train_rows']} "
+                f"feature_count={event['feature_count']} elapsed={elapsed}",
                 file=sys.stderr,
                 flush=True,
             )

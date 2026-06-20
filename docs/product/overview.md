@@ -48,9 +48,10 @@ Professor real-world data remains evaluation-only and cannot be used for
 training, validation, threshold tuning, or model selection.
 V2A classical ML sweep and frozen V2 evaluation are implemented from V2 feature
 bundles. V2B Tiny MLP and V2C Tiny CNN runs are implemented and summarized in
-`artifacts/models/v2_full_comparison/comparison.csv`. V2D remains pending until
-a spec-compliant pretrained audio embedding backend, such as YAMNet,
-EfficientAT, VGGish, or PANNs, is implemented.
+`artifacts/models/v2_full_comparison/comparison.csv`. V2D is implemented with
+the first spec-compliant pretrained embedding backend, YAMNet, and remains a
+`reference_only` baseline unless a later deployment story proves the full
+extractor is lightweight enough for edge use.
 
 ## Living Contract
 

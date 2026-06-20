@@ -565,6 +565,7 @@ def evaluate_v2_model(
     features_path: str | Path,
     metrics_out: str | Path,
     export_errors: str | Path | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Evaluate a frozen V2 model package without retuning thresholds."""
 
@@ -574,16 +575,28 @@ def evaluate_v2_model(
     partitions = _validated_partitions(bundle)
     threshold = float(model["threshold"])
     estimator = model["estimator"]
+    model_type = str(model["model_type"])
 
-    public_scores, inference = _score_with_timing(estimator, bundle.features[partitions["public_test"]])
+    public_scores, inference = _score_estimator_with_progress(
+        estimator,
+        bundle.features[partitions["public_test"]],
+        model_type,
+        "public_test",
+        progress_callback,
+    )
     public_labels = _labels_for_mask(bundle, partitions["public_test"])
-    professor_scores = _score_estimator(estimator, bundle.features[partitions["professor_test"]])
-    professor_labels = _labels_for_mask(bundle, partitions["professor_test"])
+    professor_scores, _ = _score_estimator_with_progress(
+        estimator,
+        bundle.features[partitions["professor_test"]],
+        model_type,
+        "professor_test",
+        progress_callback,
+    )
 
     report = {
         "schema_version": "v2_eval_report_v1",
         "algorithm": model["algorithm"],
-        "model_type": model["model_type"],
+        "model_type": model_type,
         "track": model["track"],
         "feature_set": bundle.feature_set,
         "feature_bundle": str(bundle.path),
@@ -605,9 +618,16 @@ def evaluate_v2_model(
             "counts": _counts_for_mask(bundle, partitions["professor_test"]),
             "metrics": _professor_metrics(bundle, partitions["professor_test"], professor_scores, threshold),
         },
+        "combined_supplementary": _combined_supplementary_metrics(
+            bundle,
+            partitions,
+            public_scores,
+            professor_scores,
+            threshold,
+        ),
         "efficiency": {
             "feature_count": bundle.feature_count,
-            "model_type": model["model_type"],
+            "model_type": model_type,
             "model_size_bytes": Path(model_path).stat().st_size,
             "model_size": _format_bytes(Path(model_path).stat().st_size),
             "parameter_count": _model_parameter_count(estimator),
@@ -619,6 +639,7 @@ def evaluate_v2_model(
         "limitations": [
             "Professor data is positive-only or near-positive-only evaluation data.",
             "Professor data is not used for training, validation, threshold tuning, or model selection.",
+            "Combined supplementary metrics include positive-only professor rows and do not replace public_test.",
         ],
     }
     output_path = Path(metrics_out)
@@ -723,6 +744,13 @@ def _candidate_metrics(
             "counts": _counts_for_mask(bundle, partitions["professor_test"]),
             "metrics": _professor_metrics(bundle, partitions["professor_test"], professor_scores, threshold),
         },
+        "combined_supplementary": _combined_supplementary_metrics(
+            bundle,
+            partitions,
+            public_scores,
+            professor_scores,
+            threshold,
+        ),
         "efficiency": {
             "feature_count": bundle.feature_count,
             "model_type": model_type,
@@ -800,6 +828,13 @@ def _feature_model_metrics(
             "counts": _counts_for_mask(bundle, partitions["professor_test"]),
             "metrics": _professor_metrics(bundle, partitions["professor_test"], professor_scores, threshold),
         },
+        "combined_supplementary": _combined_supplementary_metrics(
+            bundle,
+            partitions,
+            public_scores,
+            professor_scores,
+            threshold,
+        ),
         "efficiency": {
             "feature_count": bundle.feature_count,
             "model_type": model_type,
@@ -952,6 +987,68 @@ def _score_with_timing(estimator: Any, features: Any) -> tuple[list[float], floa
     scores = _score_estimator(estimator, features)
     elapsed = time.perf_counter() - started_at
     per_window = elapsed / len(scores) if scores else 0.0
+    return scores, per_window
+
+
+def _score_estimator_with_progress(
+    estimator: Any,
+    features: Any,
+    model_type: str,
+    phase: str,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    batch_size: int = 8192,
+) -> tuple[list[float], float]:
+    total = int(len(features))
+    started_at = time.perf_counter()
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "eval_start",
+                "model_type": model_type,
+                "phase": phase,
+                "total_rows": total,
+                "batch_size": batch_size,
+            }
+        )
+    if total == 0:
+        return [], 0.0
+    scores: list[float] = []
+    for start in range(0, total, batch_size):
+        batch = features[start : start + batch_size]
+        scores.extend(_score_estimator(estimator, batch))
+        processed = min(start + batch_size, total)
+        if progress_callback is not None and (
+            processed == total
+            or processed == len(batch)
+            or processed % (batch_size * 5) == 0
+        ):
+            elapsed = max(time.perf_counter() - started_at, 0.0)
+            rate = processed / elapsed if elapsed else 0.0
+            eta = (total - processed) / rate if rate > 0 else None
+            progress_callback(
+                {
+                    "event": "eval_progress",
+                    "model_type": model_type,
+                    "phase": phase,
+                    "processed_rows": processed,
+                    "total_rows": total,
+                    "rate": rate,
+                    "eta_seconds": eta,
+                }
+            )
+    elapsed = time.perf_counter() - started_at
+    per_window = elapsed / total if total else 0.0
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "eval_complete",
+                "model_type": model_type,
+                "phase": phase,
+                "total_rows": total,
+                "rate": total / elapsed if elapsed > 0 else 0.0,
+            }
+        )
     return scores, per_window
 
 
@@ -1115,6 +1212,33 @@ def _professor_metrics(
         "median_p_drone": statistics.median(scores),
         "prediction_stability": _prediction_stability(predictions, scores),
         "score_quantiles": _score_quantiles(scores),
+    }
+
+
+def _combined_supplementary_metrics(
+    bundle: V2FeatureBundle,
+    partitions: Mapping[str, Any],
+    public_scores: Sequence[float],
+    professor_scores: Sequence[float],
+    threshold: float,
+) -> dict[str, Any]:
+    public_rows = _row_indices(partitions["public_test"])
+    professor_rows = _row_indices(partitions["professor_test"])
+    combined_rows = public_rows + professor_rows
+    combined_labels = [bundle.labels[index] for index in combined_rows]
+    combined_scores = [float(score) for score in public_scores] + [
+        float(score) for score in professor_scores
+    ]
+    return {
+        "supplementary": True,
+        "note": (
+            "Combined metrics include positive-only or near-positive-only professor data "
+            "and do not replace the public_test benchmark."
+        ),
+        "counts": _label_counts(
+            [{"label_binary": bundle.labels[index]} for index in combined_rows]
+        ),
+        "metrics": _metrics(combined_labels, combined_scores, threshold),
     }
 
 
