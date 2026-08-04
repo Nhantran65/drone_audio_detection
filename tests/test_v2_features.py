@@ -119,6 +119,12 @@ def test_extract_v2_features_cli_writes_feature_scaler_and_audit_artifacts(
     public_manifest = tmp_path / "public_manifest.csv"
     professor_manifest = tmp_path / "professor_manifest.csv"
     _write_public_fixture(public_root, public_manifest)
+    _write_wav(
+        public_root / "train_drone.wav",
+        amplitude=0.8,
+        frequency_hz=440.0,
+        sample_rate_hz=48_000,
+    )
     _write_wav(professor_root / "professor.wav", amplitude=0.7, frequency_hz=440.0)
     _write_manifest(
         professor_manifest,
@@ -177,12 +183,19 @@ def test_extract_v2_features_cli_writes_feature_scaler_and_audit_artifacts(
     assert bundle["label_subtypes"].shape == (7,)
     assert bundle["window_start_sec"].shape == (7,)
     assert bundle["window_end_sec"].shape == (7,)
+    assert str(bundle["preprocessing_profile"].item()) == "mono_resample_poly_16khz_v1"
+    assert int(bundle["processed_sample_rate_hz"].item()) == 16_000
+    assert set(bundle["processed_sample_rates_hz"].tolist()) == {16_000}
+    assert set(bundle["source_sample_rates_hz"].tolist()) == {16_000, 48_000}
+    assert len(str(bundle["bundle_fingerprint"].item())) == 64
     assert list(bundle["splits"]).count("train") == 2
     assert list(bundle["splits"]).count("professor_test") == 1
     assert int(np.count_nonzero(bundle["is_professor_data"])) == 1
     assert "professor-clip" in set(bundle["clip_ids"])
     assert scaler["fitted_split"] == "train"
     assert scaler["train_rows"] == 2
+    assert scaler["preprocessing_profile"] == "mono_resample_poly_16khz_v1"
+    assert scaler["processed_sample_rate_hz"] == 16_000
     assert len(scaler["mean"]) == 100
     assert audit["feature_set"] == "spectral_mfcc_v1"
     assert audit["feature_count"] == 100
@@ -190,6 +203,7 @@ def test_extract_v2_features_cli_writes_feature_scaler_and_audit_artifacts(
     assert audit["counts"]["splits"]["train"]["rows"] == 2
     assert audit["counts"]["splits"]["professor_test"]["rows"] == 1
     assert audit["scaler"]["train_rows"] == 2
+    assert audit["source_sample_rates_hz"] == [16_000, 48_000]
 
 
 def test_extract_v2_features_cli_reports_missing_public_manifest(

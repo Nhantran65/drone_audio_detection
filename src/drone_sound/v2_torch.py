@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from drone_sound.training import NEGATIVE_LABEL, POSITIVE_LABEL, _metrics
+from drone_sound.audio_preprocessing import (
+    CANONICAL_PREPROCESSING_PROFILE,
+    LEGACY_PREPROCESSING_PROFILE,
+    canonicalize_audio,
+)
 from drone_sound.v2_ml import (
     PRIMARY_THRESHOLD_NAME,
     PROFESSOR_TEST_SPLIT,
@@ -238,6 +243,8 @@ def train_v2_cnn(
     }
     output_model = Path(model_out)
     output_metrics = Path(metrics_out)
+    if output_model.exists() or output_metrics.exists():
+        raise V2MLError("refusing to overwrite existing V2C model or metrics artifact")
     output_model.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -252,6 +259,9 @@ def train_v2_cnn(
             "thresholds": metrics["thresholds"],
             "state_dict": model.state_dict(),
             "labels": {"positive": POSITIVE_LABEL, "negative": NEGATIVE_LABEL},
+            "preprocessing_profile": bundle.preprocessing_profile,
+            "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+            "source_bundle_fingerprint": bundle.bundle_fingerprint,
         },
         output_model,
     )
@@ -309,6 +319,7 @@ def evaluate_v2_cnn(
     except Exception as error:
         raise V2MLError(f"invalid V2C model artifact: {checkpoint_path}") from error
     _validate_torch_checkpoint(checkpoint)
+    _require_checkpoint_compatible(checkpoint, bundle)
     model = _TinyCnn(LOGMEL_BINS, LOGMEL_FRAMES).to(device)
     model.load_state_dict(checkpoint["state_dict"])
     threshold = float(checkpoint["threshold"])
@@ -352,6 +363,9 @@ def evaluate_v2_cnn(
         "feature_set": LOGMEL_FEATURE_SET,
         "source_feature_bundle": str(bundle.path),
         "feature_bundle": str(bundle.path),
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+        "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "model_path": str(checkpoint_path),
         "threshold": threshold,
         "threshold_name": checkpoint["threshold_name"],
@@ -479,7 +493,11 @@ def _logmel_cache(
     expected_shape = (bundle.row_count, LOGMEL_BINS, LOGMEL_FRAMES)
     if cache_path.exists() and meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if tuple(meta.get("shape", ())) == expected_shape:
+        if (
+            tuple(meta.get("shape", ())) == expected_shape
+            and meta.get("bundle_fingerprint") == bundle.bundle_fingerprint
+            and meta.get("preprocessing_profile") == bundle.preprocessing_profile
+        ):
             if progress_callback is not None:
                 progress_callback(
                     {
@@ -490,6 +508,12 @@ def _logmel_cache(
                     }
                 )
             return np.load(cache_path, mmap_mode="r")
+        raise V2MLError(
+            "existing log-mel cache does not match bundle fingerprint/profile; "
+            "use a fresh cache directory"
+        )
+    if cache_path.exists() or meta_path.exists():
+        raise V2MLError("incomplete log-mel cache exists; use a fresh cache directory")
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     matrix = np.lib.format.open_memmap(
         cache_path,
@@ -535,6 +559,9 @@ def _logmel_cache(
                 "shape": list(expected_shape),
                 "dtype": "float16",
                 "source_bundle": str(bundle.path),
+                "bundle_fingerprint": bundle.bundle_fingerprint,
+                "preprocessing_profile": bundle.preprocessing_profile,
+                "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
             },
             indent=2,
             sort_keys=True,
@@ -575,16 +602,20 @@ def _fill_window_cache(
             samples, metadata = read_wav_mono_array(audio_path)
         except (ImportError, WavReadError) as error:
             raise V2MLError(str(error)) from error
+        window_sample_rate = metadata.sample_rate_hz
+        if bundle.preprocessing_profile == CANONICAL_PREPROCESSING_PROFILE:
+            samples = canonicalize_audio(samples, metadata.sample_rate_hz, TARGET_SAMPLE_RATE)
+            window_sample_rate = TARGET_SAMPLE_RATE
         windows: list[Any] = []
         indices: list[int] = []
         for row_index in row_indices:
             start = bundle.window_start_sec[row_index]
             end = bundle.window_end_sec[row_index]
-            window = _window_samples(np, samples, metadata.sample_rate_hz, start, end, audio_path)
+            window = _window_samples(np, samples, window_sample_rate, start, end, audio_path)
             windows.append(window)
             indices.append(row_index)
             if len(windows) == batch_size:
-                _write_window_batch(torch, torchaudio, matrix, extract, indices, windows, metadata.sample_rate_hz)
+                _write_window_batch(torch, torchaudio, matrix, extract, indices, windows, window_sample_rate)
                 processed += len(windows)
                 if processed >= next_report or processed == bundle.row_count:
                     _cache_progress(progress_callback, phase, processed, bundle.row_count, file_index, len(groups), audio_path, started_at)
@@ -593,7 +624,7 @@ def _fill_window_cache(
                 windows = []
                 indices = []
         if windows:
-            _write_window_batch(torch, torchaudio, matrix, extract, indices, windows, metadata.sample_rate_hz)
+            _write_window_batch(torch, torchaudio, matrix, extract, indices, windows, window_sample_rate)
             processed += len(windows)
             if processed >= next_report or processed == bundle.row_count:
                 _cache_progress(progress_callback, phase, processed, bundle.row_count, file_index, len(groups), audio_path, started_at)
@@ -882,6 +913,26 @@ def _validate_torch_checkpoint(checkpoint: Any) -> None:
         raise V2MLError(f"V2C feature_set must be {LOGMEL_FEATURE_SET}")
     if checkpoint["threshold_name"] != PRIMARY_THRESHOLD_NAME:
         raise V2MLError("V2C model threshold_name must be threshold_f2")
+    checkpoint.setdefault("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
+    checkpoint.setdefault("processed_sample_rate_hz", None)
+    checkpoint.setdefault("source_bundle_fingerprint", None)
+
+
+def _require_checkpoint_compatible(
+    checkpoint: Mapping[str, Any], bundle: V2FeatureBundle
+) -> None:
+    profile = str(
+        checkpoint.get("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
+    )
+    if profile != bundle.preprocessing_profile:
+        raise V2MLError(
+            "preprocessing profile mismatch: "
+            f"model={profile}, feature_bundle={bundle.preprocessing_profile}"
+        )
+    if checkpoint.get("processed_sample_rate_hz") != bundle.processed_sample_rate_hz:
+        raise V2MLError(
+            "processed sample-rate mismatch between V2C model and feature bundle"
+        )
 
 
 def _torch_logmel_batch(torch: Any, cache: Any, indices: Sequence[int], device: Any) -> Any:

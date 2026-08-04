@@ -60,6 +60,26 @@ The combined supplementary block reports the same binary metrics as public
 test, using public-test rows plus professor rows and the frozen stored
 threshold.
 
+## Private Real-Only External Test
+
+US-017 adds one professor-positive recording (1,113 windows) and ten asserted
+private-negative recordings (592 windows) as an external stress test. All rows
+use `mono_resample_poly_16khz_v1`; the model and `threshold_f2` must already be
+frozen. This set cannot be used for fitting, threshold tuning, early stopping,
+or model selection.
+
+`eval-real-v2` auto-detects V2A/V2B joblib packages, V2C PyTorch checkpoints,
+and V2D YAMNet heads. It reports confusion matrix, balanced accuracy,
+precision, recall, F1/F2, ROC-AUC, PR-AUC, FPR/FNR, per-environment metrics,
+and per-negative-recording FPR. Accuracy alone is not a conclusion. Because
+there is only one independent positive recording and ten negative recordings,
+the result is not a deployment-performance estimate.
+
+Repeated post-freeze rescue diagnostics on this same set are explicitly
+exploratory. They may describe operating-point sensitivity, but they cannot be
+used to claim an independently validated model improvement or to select a
+production checkpoint.
+
 ## Threshold Rule
 
 Thresholds must be selected with validation data only. Professor data must not
@@ -68,10 +88,9 @@ be used for threshold selection.
 For v1, `public_test` is a fixed split produced by the public manifest builder.
 It must not be used for threshold selection or k-fold training.
 
-For V2.1, validation F2 remains the main selection metric, with FPR, precision,
-professor recall, longest missed professor segment, model size, and inference
-latency as guardrails. A candidate should not be selected if it improves F2 only
-by significantly increasing false positives.
+For canonical V2, validation F2 is the only primary selection metric; ties use
+lower validation FPR and then smaller model size. Public test, professor test,
+and private real-only data are excluded from selection.
 
 Every V2 candidate should report these validation-selected thresholds:
 

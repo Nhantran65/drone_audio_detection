@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from drone_sound.manifest import load_manifest_csv, validate_manifest_rows
+from drone_sound.audio_preprocessing import (
+    CANONICAL_PREPROCESSING_PROFILE,
+    FEATURE_BUNDLE_SCHEMA_VERSION,
+    canonicalize_audio,
+)
+from drone_sound.constants import TARGET_SAMPLE_RATE_HZ
 from drone_sound.training import NEGATIVE_LABEL, POSITIVE_LABEL
 from drone_sound.v2 import ENGINEERED_FEATURE_SETS, V2InputError, validate_feature_set
 from drone_sound.wav_audio import WavReadError, read_wav_mono_array
@@ -157,16 +164,22 @@ def build_v2_feature_bundle(
     professor_audio_root: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
     progress_every: int = 0,
+    target_sample_rate_hz: int = TARGET_SAMPLE_RATE_HZ,
 ) -> dict[str, Any]:
     """Extract V2 features, write bundle/scaler/audit artifacts, and return audit."""
 
     np, _ = _require_data_dependencies()
+    if target_sample_rate_hz != TARGET_SAMPLE_RATE_HZ:
+        raise V2FeatureError(
+            f"canonical V2 preprocessing requires {TARGET_SAMPLE_RATE_HZ} Hz"
+        )
     names = feature_names(feature_set)
     public_manifest = Path(public_manifest_path)
     public_root = Path(public_audio_root)
     features_out = Path(features_out)
     scaler_out = Path(scaler_out)
     audit_out = Path(audit_out)
+    _require_outputs_absent(features_out, scaler_out, audit_out)
 
     _validate_existing_file(public_manifest, "public manifest")
     _validate_existing_directory(public_root, "public audio root")
@@ -200,6 +213,7 @@ def build_v2_feature_bundle(
         feature_set,
         progress_callback=progress_callback,
         progress_every=progress_every,
+        target_sample_rate_hz=target_sample_rate_hz,
     )
     if progress_callback is not None:
         progress_callback(
@@ -216,6 +230,14 @@ def build_v2_feature_bundle(
     train_features = raw_features[train_mask]
     scaler = fit_scaler(train_features)
     scaled_features = apply_scaler(raw_features, scaler)
+    bundle_fingerprint = _bundle_fingerprint(
+        raw_features,
+        feature_rows,
+        names,
+        feature_set,
+        CANONICAL_PREPROCESSING_PROFILE,
+        target_sample_rate_hz,
+    )
 
     features_out.parent.mkdir(parents=True, exist_ok=True)
     scaler_out.parent.mkdir(parents=True, exist_ok=True)
@@ -240,6 +262,7 @@ def build_v2_feature_bundle(
         original_files=np.asarray([row["original_file"] for row in feature_rows]),
         source_datasets=np.asarray([row["source_dataset"] for row in feature_rows]),
         label_subtypes=np.asarray([row["label_subtype"] for row in feature_rows]),
+        environments=np.asarray([row["environment"] for row in feature_rows]),
         window_start_sec=np.asarray(
             [row["window_start_sec"] for row in feature_rows],
             dtype=np.float64,
@@ -249,8 +272,18 @@ def build_v2_feature_bundle(
             dtype=np.float64,
         ),
         is_professor_data=professor_flags,
+        source_sample_rates_hz=np.asarray(
+            [row["source_sample_rate_hz"] for row in feature_rows], dtype=np.int32
+        ),
+        processed_sample_rates_hz=np.full(
+            len(feature_rows), target_sample_rate_hz, dtype=np.int32
+        ),
         feature_names=np.asarray(names),
         feature_set=np.asarray(feature_set),
+        bundle_schema_version=np.asarray(FEATURE_BUNDLE_SCHEMA_VERSION),
+        preprocessing_profile=np.asarray(CANONICAL_PREPROCESSING_PROFILE),
+        processed_sample_rate_hz=np.asarray(target_sample_rate_hz, dtype=np.int32),
+        bundle_fingerprint=np.asarray(bundle_fingerprint),
     )
 
     scaler_report = {
@@ -258,6 +291,9 @@ def build_v2_feature_bundle(
         "feature_names": list(names),
         "fitted_split": TRAIN_SPLIT,
         "train_rows": int(train_mask.sum()),
+        "preprocessing_profile": CANONICAL_PREPROCESSING_PROFILE,
+        "processed_sample_rate_hz": target_sample_rate_hz,
+        "source_bundle_fingerprint": bundle_fingerprint,
         "mean": scaler["mean"],
         "std": scaler["std"],
     }
@@ -270,6 +306,13 @@ def build_v2_feature_bundle(
         "feature_set": feature_set,
         "feature_count": len(names),
         "feature_names": list(names),
+        "bundle_schema_version": FEATURE_BUNDLE_SCHEMA_VERSION,
+        "bundle_fingerprint": bundle_fingerprint,
+        "preprocessing_profile": CANONICAL_PREPROCESSING_PROFILE,
+        "processed_sample_rate_hz": target_sample_rate_hz,
+        "source_sample_rates_hz": sorted(
+            {int(row["source_sample_rate_hz"]) for row in feature_rows}
+        ),
         "features": {
             "path": str(features_out),
             "rows": len(feature_rows),
@@ -290,6 +333,114 @@ def build_v2_feature_bundle(
         json.dumps(audit, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    return audit
+
+
+def build_v2_evaluation_bundle(
+    manifest_path: str | Path,
+    audio_root: str | Path,
+    feature_set: str,
+    scaler_path: str | Path,
+    features_out: str | Path,
+    audit_out: str | Path,
+    progress_callback: ProgressCallback | None = None,
+    progress_every: int = 0,
+) -> dict[str, Any]:
+    """Build an evaluation-only bundle with a frozen train-fitted scaler."""
+
+    np, _ = _require_data_dependencies()
+    manifest = Path(manifest_path)
+    root = Path(audio_root)
+    output = Path(features_out)
+    audit_path = Path(audit_out)
+    frozen_scaler_path = Path(scaler_path)
+    _require_outputs_absent(output, audit_path)
+    for path, label in (
+        (manifest, "evaluation manifest"),
+        (frozen_scaler_path, "frozen scaler"),
+    ):
+        _validate_existing_file(path, label)
+    _validate_existing_directory(root, "evaluation audio root")
+    rows_all = load_manifest_csv(manifest)
+    validate_manifest_rows(rows_all)
+    rows = _eligible_professor_rows(rows_all)
+    if not rows:
+        raise V2FeatureError("evaluation manifest contains no professor_test rows")
+    names = feature_names(feature_set)
+    scaler = json.loads(frozen_scaler_path.read_text(encoding="utf-8"))
+    if scaler.get("feature_set") != feature_set:
+        raise V2FeatureError("frozen scaler feature_set does not match request")
+    if tuple(scaler.get("feature_names", ())) != names:
+        raise V2FeatureError("frozen scaler feature_names do not match request")
+    if scaler.get("preprocessing_profile", "legacy_native_rate_v1") != CANONICAL_PREPROCESSING_PROFILE:
+        raise V2FeatureError("frozen scaler preprocessing profile is not canonical 16 kHz")
+    if scaler.get("processed_sample_rate_hz") != TARGET_SAMPLE_RATE_HZ:
+        raise V2FeatureError("frozen scaler processed sample rate is not 16000 Hz")
+
+    feature_rows, replacements = _extract_rows(
+        rows,
+        root,
+        root,
+        feature_set,
+        progress_callback=progress_callback,
+        progress_every=progress_every,
+        target_sample_rate_hz=TARGET_SAMPLE_RATE_HZ,
+    )
+    raw_features = np.asarray([row["features"] for row in feature_rows], dtype=np.float64)
+    scaled_features = apply_scaler(raw_features, scaler)
+    fingerprint = _bundle_fingerprint(
+        raw_features,
+        feature_rows,
+        names,
+        feature_set,
+        CANONICAL_PREPROCESSING_PROFILE,
+        TARGET_SAMPLE_RATE_HZ,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        output,
+        raw_features=raw_features,
+        scaled_features=scaled_features,
+        labels=np.asarray([row["label"] for row in feature_rows]),
+        splits=np.asarray([row["split"] for row in feature_rows]),
+        window_ids=np.asarray([row["window_id"] for row in feature_rows]),
+        clip_ids=np.asarray([row["clip_id"] for row in feature_rows]),
+        original_files=np.asarray([row["original_file"] for row in feature_rows]),
+        source_datasets=np.asarray([row["source_dataset"] for row in feature_rows]),
+        label_subtypes=np.asarray([row["label_subtype"] for row in feature_rows]),
+        environments=np.asarray([row["environment"] for row in feature_rows]),
+        window_start_sec=np.asarray([row["window_start_sec"] for row in feature_rows], dtype=np.float64),
+        window_end_sec=np.asarray([row["window_end_sec"] for row in feature_rows], dtype=np.float64),
+        is_professor_data=np.ones(len(feature_rows), dtype=bool),
+        source_sample_rates_hz=np.asarray([row["source_sample_rate_hz"] for row in feature_rows], dtype=np.int32),
+        processed_sample_rates_hz=np.full(len(feature_rows), TARGET_SAMPLE_RATE_HZ, dtype=np.int32),
+        feature_names=np.asarray(names),
+        feature_set=np.asarray(feature_set),
+        bundle_schema_version=np.asarray(FEATURE_BUNDLE_SCHEMA_VERSION),
+        preprocessing_profile=np.asarray(CANONICAL_PREPROCESSING_PROFILE),
+        processed_sample_rate_hz=np.asarray(TARGET_SAMPLE_RATE_HZ, dtype=np.int32),
+        bundle_fingerprint=np.asarray(fingerprint),
+    )
+    audit = {
+        "schema_version": "v2_evaluation_feature_audit_v1",
+        "evaluation_only": True,
+        "fit_or_tune_performed": False,
+        "manifest": str(manifest),
+        "audio_root": str(root),
+        "feature_bundle": str(output),
+        "frozen_scaler": str(frozen_scaler_path),
+        "scaler_source_bundle_fingerprint": scaler.get("source_bundle_fingerprint"),
+        "bundle_fingerprint": fingerprint,
+        "preprocessing_profile": CANONICAL_PREPROCESSING_PROFILE,
+        "processed_sample_rate_hz": TARGET_SAMPLE_RATE_HZ,
+        "source_sample_rates_hz": sorted({row["source_sample_rate_hz"] for row in feature_rows}),
+        "feature_set": feature_set,
+        "feature_count": len(names),
+        "counts": _counts(feature_rows),
+        "non_finite_replacements": replacements,
+    }
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return audit
 
 
@@ -393,6 +544,7 @@ def _extract_rows(
     *,
     progress_callback: ProgressCallback | None = None,
     progress_every: int = 0,
+    target_sample_rate_hz: int = TARGET_SAMPLE_RATE_HZ,
 ) -> tuple[list[dict[str, Any]], int]:
     np, _ = _require_data_dependencies()
     by_audio_path: dict[Path, list[dict[str, Any]]] = defaultdict(list)
@@ -423,13 +575,20 @@ def _extract_rows(
             samples, metadata = read_wav_mono_array(audio_path)
         except (ImportError, WavReadError) as error:
             raise V2FeatureError(str(error)) from error
+        samples = canonicalize_audio(
+            samples,
+            metadata.sample_rate_hz,
+            target_sample_rate_hz,
+        )
         for row in file_rows:
             start_sec = float(str(row["window_start_sec"]).strip())
             end_sec = float(str(row["window_end_sec"]).strip())
-            window_samples = _slice_window(samples, metadata.sample_rate_hz, start_sec, end_sec, audio_path)
+            window_samples = _slice_window(
+                samples, target_sample_rate_hz, start_sec, end_sec, audio_path
+            )
             features, replacements = extract_feature_vector(
                 np.asarray(window_samples, dtype=np.float64),
-                metadata.sample_rate_hz,
+                target_sample_rate_hz,
                 feature_set,
             )
             non_finite_replacements += replacements
@@ -444,9 +603,11 @@ def _extract_rows(
                     "original_file": row["original_file"],
                     "source_dataset": row["source_dataset"],
                     "label_subtype": row["label_subtype"],
+                    "environment": row["environment"],
                     "window_start_sec": start_sec,
                     "window_end_sec": end_sec,
                     "is_professor_data": row["is_professor_data"],
+                    "source_sample_rate_hz": metadata.sample_rate_hz,
                 }
             )
             should_report = processed_rows == total_rows or (
@@ -502,10 +663,43 @@ def _normalized_row(row: Mapping[str, str], *, is_professor_data: bool) -> dict[
         "original_file": str(row["original_file"]).strip(),
         "source_dataset": str(row["source_dataset"]).strip(),
         "label_subtype": str(row["label_subtype"]).strip(),
+        "environment": str(row.get("environment", "")).strip(),
         "window_start_sec": str(row["window_start_sec"]).strip(),
         "window_end_sec": str(row["window_end_sec"]).strip(),
         "is_professor_data": is_professor_data,
     }
+
+
+def _bundle_fingerprint(
+    raw_features: object,
+    rows: list[dict[str, Any]],
+    names: tuple[str, ...],
+    feature_set: str,
+    preprocessing_profile: str,
+    processed_sample_rate_hz: int,
+) -> str:
+    """Hash bundle content and row identity for cache/model provenance."""
+
+    np, _ = _require_data_dependencies()
+    digest = hashlib.sha256()
+    header = {
+        "schema_version": FEATURE_BUNDLE_SCHEMA_VERSION,
+        "feature_set": feature_set,
+        "feature_names": list(names),
+        "preprocessing_profile": preprocessing_profile,
+        "processed_sample_rate_hz": processed_sample_rate_hz,
+    }
+    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode())
+    for row in rows:
+        digest.update(str(row["window_id"]).encode())
+        digest.update(b"\0")
+        digest.update(str(row["label"]).encode())
+        digest.update(b"\0")
+        digest.update(str(row["split"]).encode())
+        digest.update(b"\0")
+    matrix = np.ascontiguousarray(raw_features, dtype="<f8")
+    digest.update(memoryview(matrix).cast("B"))
+    return digest.hexdigest()
 
 
 def _slice_window(
@@ -633,6 +827,14 @@ def _validate_existing_directory(path: Path, field: str) -> None:
         raise V2InputError(f"{field} does not exist: {path}")
     if not path.is_dir():
         raise V2InputError(f"{field} is not a directory: {path}")
+
+
+def _require_outputs_absent(*paths: Path) -> None:
+    existing = [str(path) for path in paths if path.exists()]
+    if existing:
+        raise V2FeatureError(
+            "refusing to overwrite existing V2 artifact(s): " + ", ".join(existing)
+        )
 
 
 def _truthy(value: object) -> bool:

@@ -29,9 +29,10 @@ For each window row:
 - `window_id` is unique and deterministic.
 
 The US-004 public manifest builder audits local raw WAV files and does not
-write processed audio copies. Until a preprocessing story adds resampling,
-`sample_rate_processed` mirrors the audited source sample rate and sample-rate
-or channel mismatches are visible in the audit JSON.
+write processed audio copies. The canonical V2 preprocessing profile
+`mono_resample_poly_16khz_v1` decodes and downmixes each complete recording,
+resamples it once with `scipy.signal.resample_poly` to 16 kHz, and only then
+applies manifest window boundaries. It does not write processed audio copies.
 
 NASA Small UAS local `.mat` files are converted into derived mono 16 kHz WAV
 files before they feed the public manifest builder. Conversion reads
@@ -105,9 +106,14 @@ DCT-II, and mean/std plus delta mean/std summaries across frames.
   `window_end_sec`.
 - Progress logs every 5,000 rows by default; override with `--progress-every N`
   or use `--progress-every 0` to disable row progress logs.
+- Bundle schema, preprocessing profile, source/processed rates, environment,
+  and a deterministic content fingerprint used to validate model/cache reuse.
+
+Artifacts without profile metadata are read as `legacy_native_rate_v1`.
+Legacy and canonical bundles, scalers, models, or caches must not be mixed.
 
 V2D embeddings are extracted from the same feature bundle metadata rather than
-from `extract-v2-features`. The YAMNet path reads each referenced 1-second
-window, standardizes it to mono 16 kHz, runs the pretrained TensorFlow Hub
+from `extract-v2-features`. The YAMNet path reuses the full-recording canonical
+16-kHz waveform, reads each referenced 1-second window, runs the TensorFlow Hub
 extractor, mean-pools frame embeddings, and caches the resulting
 `pretrained_embedding_v1` matrix for reuse.

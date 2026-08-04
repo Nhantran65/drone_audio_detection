@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from drone_sound.training import NEGATIVE_LABEL, POSITIVE_LABEL, PUBLIC_TEST_SPLIT, TRAIN_SPLIT, VAL_SPLIT, _metrics
+from drone_sound.audio_preprocessing import (
+    CANONICAL_PREPROCESSING_PROFILE,
+    LEGACY_PREPROCESSING_PROFILE,
+    canonicalize_audio,
+)
 from drone_sound.v2_ml import (
     PRIMARY_THRESHOLD_NAME,
     PROFESSOR_TEST_SPLIT,
@@ -106,6 +111,8 @@ def train_v2_embedding(
 
     output_model = Path(model_out)
     output_metrics = Path(metrics_out)
+    if output_model.exists() or output_metrics.exists():
+        raise V2MLError("refusing to overwrite existing V2D model or metrics artifact")
     output_model.parent.mkdir(parents=True, exist_ok=True)
     _, joblib, _ = _require_ml_dependencies()
     joblib.dump(_model_package(embeddings, estimator, metrics, cache_report), output_model)
@@ -141,6 +148,7 @@ def evaluate_v2_embedding(
         raise V2MLError("batch size must be > 0")
     model = load_v2_embedding_model(model_path)
     bundle = load_feature_bundle(features_path)
+    _require_embedding_model_compatible(model, bundle)
     partitions = _validated_partitions(bundle)
     embeddings, cache_report = _embedding_cache_from_model(model, bundle)
     estimator = model["estimator"]
@@ -280,6 +288,9 @@ def load_v2_embedding_model(path: str | Path) -> dict[str, Any]:
         raise V2MLError("V2D model threshold_name must be threshold_f2")
     if model["deployability_label"] != "reference_only":
         raise V2MLError("V2D YAMNet model must be marked reference_only")
+    model.setdefault("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
+    model.setdefault("processed_sample_rate_hz", None)
+    model.setdefault("source_bundle_fingerprint", None)
     embedding = model["embedding"]
     if not isinstance(embedding, Mapping):
         raise V2MLError("V2D model embedding metadata must be an object")
@@ -315,6 +326,12 @@ def _yamnet_embedding_cache(
                 }
             )
         return matrix, report
+
+    if cache_path.exists() or meta_path.exists():
+        raise V2MLError(
+            "existing YAMNet cache does not match bundle fingerprint/profile; "
+            "use a fresh cache directory"
+        )
 
     cache_root.mkdir(parents=True, exist_ok=True)
     groups = _group_rows_by_audio(bundle, public_audio_root, professor_audio_root)
@@ -380,8 +397,12 @@ def _yamnet_embedding_cache(
             samples, metadata = read_wav_mono_array(audio_path)
         except (ImportError, WavReadError) as error:
             raise V2MLError(str(error)) from error
+        window_sample_rate = metadata.sample_rate_hz
+        if bundle.preprocessing_profile == CANONICAL_PREPROCESSING_PROFILE:
+            samples = canonicalize_audio(samples, metadata.sample_rate_hz, TARGET_SAMPLE_RATE)
+            window_sample_rate = TARGET_SAMPLE_RATE
         for row_index in row_indices:
-            window = _window_samples(np, samples, metadata.sample_rate_hz, bundle, row_index, audio_path)
+            window = _window_samples(np, samples, window_sample_rate, bundle, row_index, audio_path)
             batch_indices.append(row_index)
             batch_windows.append(window)
             if len(batch_windows) >= max(progress_every, 1):
@@ -438,15 +459,31 @@ def _embedding_cache_from_model(
     return matrix, report
 
 
+def _require_embedding_model_compatible(
+    model: Mapping[str, Any], bundle: V2FeatureBundle
+) -> None:
+    profile = str(model.get("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE))
+    if profile != bundle.preprocessing_profile:
+        raise V2MLError(
+            "preprocessing profile mismatch: "
+            f"model={profile}, feature_bundle={bundle.preprocessing_profile}"
+        )
+    if model.get("processed_sample_rate_hz") != bundle.processed_sample_rate_hz:
+        raise V2MLError(
+            "processed sample-rate mismatch between V2D model and feature bundle"
+        )
+
+
 def _cache_meta_matches(meta: Mapping[str, Any], bundle: V2FeatureBundle) -> bool:
     return (
-        _same_path_value(str(meta.get("source_bundle", "")), bundle.path)
-        and meta.get("feature_set") == V2D_FEATURE_SET
+        meta.get("feature_set") == V2D_FEATURE_SET
         and meta.get("embedding_model") == YAMNET_MODEL_NAME
         and meta.get("backend") == "tensorflow_hub"
         and meta.get("model_handle") == YAMNET_MODEL_HANDLE
         and meta.get("aggregation") == YAMNET_AGGREGATION
         and tuple(meta.get("shape", ()))[:1] == (bundle.row_count,)
+        and meta.get("bundle_fingerprint") == bundle.bundle_fingerprint
+        and meta.get("preprocessing_profile") == bundle.preprocessing_profile
     )
 
 
@@ -471,6 +508,9 @@ def _cache_meta(bundle: V2FeatureBundle, embedding_dim: int, dtype: str) -> dict
         "shape": [bundle.row_count, embedding_dim],
         "dtype": dtype,
         "source_bundle": str(bundle.path),
+        "bundle_fingerprint": bundle.bundle_fingerprint,
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
         "expected_embedding_dim": YAMNET_EXPECTED_EMBEDDING_DIM,
     }
 
@@ -488,6 +528,9 @@ def _cache_report(meta: Mapping[str, Any], cache_path: Path, meta_path: Path, *,
         "shape": list(meta["shape"]),
         "dtype": meta["dtype"],
         "source_bundle": meta["source_bundle"],
+        "bundle_fingerprint": meta["bundle_fingerprint"],
+        "preprocessing_profile": meta["preprocessing_profile"],
+        "processed_sample_rate_hz": meta["processed_sample_rate_hz"],
     }
 
 
@@ -688,6 +731,9 @@ def _embedding_metrics(
         "feature_set": V2D_FEATURE_SET,
         "source_feature_bundle": str(bundle.path),
         "feature_bundle": str(bundle.path),
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+        "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_count": int(embeddings.shape[1]),
         "threshold_name": PRIMARY_THRESHOLD_NAME,
         "threshold": threshold,
@@ -774,6 +820,9 @@ def _model_package(
         "embedding": dict(cache_report),
         "deployability_label": metrics["efficiency"]["deployability_label"],
         "selection": dict(metrics["selection"]),
+        "preprocessing_profile": metrics["preprocessing_profile"],
+        "processed_sample_rate_hz": metrics["processed_sample_rate_hz"],
+        "source_bundle_fingerprint": metrics["source_bundle_fingerprint"],
     }
 
 

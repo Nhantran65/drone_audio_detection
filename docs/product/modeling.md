@@ -55,6 +55,19 @@ V2B and V2C training keeps the best validation checkpoint and can stop early
 with `patience`/`min_delta`. Metrics JSON stores the epoch-level learning curve
 so later model selection can distinguish true improvement from plateau noise.
 
+All canonical V2 model packages store the preprocessing profile, processed
+sample rate, and training-bundle fingerprint. A model can evaluate a different
+bundle only when feature names and preprocessing contract match. Model
+selection is validation-only: highest validation F2, then lower validation FPR,
+then smaller serialized model size. Public, professor, and private real-only
+results are post-freeze reports and never selection inputs.
+
+US-018 adds an optional, isolated Tiny MLP rescue sweep over positive weighting,
+public-source balancing, mild feature-noise regularization, and a modest width
+increase. It preserves the current Tiny MLP defaults and all existing artifacts.
+The rescue winner follows the same validation-only selection rule; stress-test
+results cannot override that winner.
+
 ## V2.1 Stop Criteria
 
 Stop and report if any deployable lightweight V2A/V2B/V2C candidate achieves:

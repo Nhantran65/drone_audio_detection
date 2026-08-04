@@ -168,6 +168,84 @@ def test_train_v2_mlp_writes_frozen_model_and_metrics(tmp_path: Path) -> None:
     assert model_out.exists()
 
 
+def test_train_v2_mlp_rescue_parameters_are_recorded(tmp_path: Path) -> None:
+    features = _write_feature_bundle(tmp_path / "features.npz")
+    model_out = tmp_path / "models" / "weighted.joblib"
+    metrics_out = tmp_path / "metrics" / "weighted.json"
+
+    report = train_v2_mlp(
+        features,
+        model_out,
+        metrics_out,
+        epochs=1,
+        batch_size=4,
+        patience=1,
+        hidden_layer_sizes=(8, 4),
+        alpha=1e-3,
+        positive_class_weight=1.5,
+        balance_sources=True,
+        feature_noise_std=0.01,
+        variant_name="weighted_fixture",
+    )
+
+    assert report["training_config"] == {
+        "variant_name": "weighted_fixture",
+        "hidden_layer_sizes": [8, 4],
+        "activation": "relu",
+        "alpha": 1e-3,
+        "learning_rate_init": 1e-3,
+        "positive_class_weight": 1.5,
+        "balance_sources": True,
+        "feature_noise_std": 0.01,
+        "random_seed": 20260619,
+        "batch_size": 4,
+    }
+    assert report["selection"]["uses_professor_data"] is False
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"hidden_layer_sizes": ()}, "hidden_layer_sizes"),
+        ({"positive_class_weight": 0.0}, "positive_class_weight"),
+        ({"feature_noise_std": -0.1}, "feature_noise_std"),
+    ],
+)
+def test_train_v2_mlp_rejects_invalid_rescue_parameters(
+    tmp_path: Path,
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(V2MLError, match=message):
+        train_v2_mlp(
+            tmp_path / "unused.npz",
+            tmp_path / "model.joblib",
+            tmp_path / "metrics.json",
+            **kwargs,
+        )
+
+
+def test_model_bundle_preprocessing_profiles_cannot_be_mixed(tmp_path: Path) -> None:
+    legacy = _write_feature_bundle(tmp_path / "legacy.npz")
+    canonical = _canonical_copy(legacy, tmp_path / "canonical.npz")
+
+    run_v2a_sweep(legacy, ["logistic_regression"], tmp_path / "legacy_models")
+    with pytest.raises(V2MLError, match="preprocessing profile mismatch"):
+        evaluate_v2_model(
+            tmp_path / "legacy_models/models/logistic_regression.joblib",
+            canonical,
+            tmp_path / "bad_legacy_new.json",
+        )
+
+    run_v2a_sweep(canonical, ["logistic_regression"], tmp_path / "new_models")
+    with pytest.raises(V2MLError, match="preprocessing profile mismatch"):
+        evaluate_v2_model(
+            tmp_path / "new_models/models/logistic_regression.joblib",
+            legacy,
+            tmp_path / "bad_new_legacy.json",
+        )
+
+
 def test_train_v2_embedding_reuses_cache_and_keeps_professor_eval_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -319,6 +397,25 @@ def _subtype(label: str) -> str:
     if label == POSITIVE_LABEL:
         return "drone_field"
     return "no_drone_background"
+
+
+def _canonical_copy(source: Path, output: Path) -> Path:
+    with np.load(source, allow_pickle=False) as data:
+        arrays = {name: data[name] for name in data.files}
+    rows = len(arrays["labels"])
+    arrays.update(
+        {
+            "environments": np.asarray(["fixture"] * rows),
+            "source_sample_rates_hz": np.full(rows, 16_000, dtype=np.int32),
+            "processed_sample_rates_hz": np.full(rows, 16_000, dtype=np.int32),
+            "bundle_schema_version": np.asarray("v2_feature_bundle_v2"),
+            "preprocessing_profile": np.asarray("mono_resample_poly_16khz_v1"),
+            "processed_sample_rate_hz": np.asarray(16_000, dtype=np.int32),
+            "bundle_fingerprint": np.asarray("a" * 64),
+        }
+    )
+    np.savez_compressed(output, **arrays)
+    return output
 
 
 def _write_audio_files_for_bundle(features: Path, public_root: Path, professor_root: Path) -> None:

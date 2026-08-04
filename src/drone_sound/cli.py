@@ -267,6 +267,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=5_000,
         help="Print feature extraction progress every N rows; use 0 to disable row progress.",
     )
+    extract_v2_parser.add_argument(
+        "--target-sample-rate",
+        type=int,
+        default=16_000,
+        help="Canonical processed sample rate; V2 currently requires 16000.",
+    )
 
     sweep_v2_parser = subcommands.add_parser(
         "sweep-v2-ml",
@@ -328,6 +334,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Minimum validation F2 delta required to count as an improvement.",
     )
+
+    mlp_rescue_parser = subcommands.add_parser(
+        "sweep-v2-mlp-rescue",
+        help="Run the isolated validation-selected canonical Tiny MLP rescue sweep.",
+    )
+    mlp_rescue_parser.add_argument("--features", required=True, type=Path)
+    mlp_rescue_parser.add_argument("--out-dir", required=True, type=Path)
+    mlp_rescue_parser.add_argument("--epochs", type=int, default=20)
+    mlp_rescue_parser.add_argument("--batch-size", type=int, default=4096)
+    mlp_rescue_parser.add_argument("--patience", type=int, default=4)
+    mlp_rescue_parser.add_argument("--min-delta", type=float, default=0.0)
 
     cnn_parser = subcommands.add_parser(
         "train-v2-cnn",
@@ -533,6 +550,59 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_v2_embedding_parser.add_argument("--batch-size", type=int, default=8192, help="Evaluation batch size.")
 
+    private_manifest_parser = subcommands.add_parser(
+        "build-private-real-manifest",
+        help="Build the test-only professor-positive plus private-negative manifest.",
+    )
+    private_manifest_parser.add_argument("--professor-manifest", required=True, type=Path)
+    private_manifest_parser.add_argument("--private-audio-root", required=True, type=Path)
+    private_manifest_parser.add_argument("--negatives-dir", required=True, type=Path)
+    private_manifest_parser.add_argument("--manifest-out", required=True, type=Path)
+    private_manifest_parser.add_argument("--audit-out", required=True, type=Path)
+
+    eval_features_parser = subcommands.add_parser(
+        "extract-v2-eval-features",
+        help="Extract a canonical evaluation-only bundle with a frozen scaler.",
+    )
+    eval_features_parser.add_argument("--manifest", required=True, type=Path)
+    eval_features_parser.add_argument("--audio-root", required=True, type=Path)
+    eval_features_parser.add_argument(
+        "--feature-set", required=True, choices=ENGINEERED_FEATURE_SETS
+    )
+    eval_features_parser.add_argument("--scaler", required=True, type=Path)
+    eval_features_parser.add_argument("--features-out", required=True, type=Path)
+    eval_features_parser.add_argument("--audit-out", required=True, type=Path)
+    eval_features_parser.add_argument("--progress-every", type=int, default=500)
+
+    real_eval_parser = subcommands.add_parser(
+        "eval-real-v2",
+        help="Evaluate one frozen V2A/B/C/D model on the private real-only bundle.",
+    )
+    real_eval_parser.add_argument("--model", required=True, type=Path)
+    real_eval_parser.add_argument("--features", required=True, type=Path)
+    real_eval_parser.add_argument("--audio-root", required=True, type=Path)
+    real_eval_parser.add_argument("--cache-dir", required=True, type=Path)
+    real_eval_parser.add_argument("--metrics-out", required=True, type=Path)
+    real_eval_parser.add_argument("--export-errors", type=Path)
+    real_eval_parser.add_argument("--batch-size", type=int, default=512)
+
+    init_run_parser = subcommands.add_parser(
+        "init-v2-16khz-run",
+        help="Inventory legacy artifacts and create a fresh isolated V2 16-kHz run root.",
+    )
+    init_run_parser.add_argument("--run-root", required=True, type=Path)
+    init_run_parser.add_argument("--legacy-root", required=True, type=Path)
+
+    finalize_run_parser = subcommands.add_parser(
+        "finalize-v2-16khz-run",
+        help="Verify legacy hashes and finalize comparison/provenance artifacts.",
+    )
+    finalize_run_parser.add_argument("--run-root", required=True, type=Path)
+    finalize_run_parser.add_argument("--legacy-root", required=True, type=Path)
+    finalize_run_parser.add_argument("--public-manifest", required=True, type=Path)
+    finalize_run_parser.add_argument("--professor-manifest", required=True, type=Path)
+    finalize_run_parser.add_argument("--legacy-feature-bundle", required=True, type=Path)
+
     return parser
 
 
@@ -661,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.professor_audio_root,
                 progress_callback=_v2_feature_progress_logger(),
                 progress_every=args.progress_every,
+                target_sample_rate_hz=args.target_sample_rate,
             )
         except V2InputError as error:
             print(f"v2 input error: {error}", file=sys.stderr)
@@ -717,6 +788,33 @@ def main(argv: list[str] | None = None) -> int:
             f"public_test_f2={_format_metric(report['public_test']['metrics']['f2'])} "
             f"professor_recall={_format_metric(report['professor_test']['metrics']['recall'])} "
             f"-> {args.model_out}"
+        )
+        return 0
+
+    if args.command == "sweep-v2-mlp-rescue":
+        from drone_sound.v2_mlp_rescue import run_v2_mlp_rescue
+        from drone_sound.v2_ml import V2MLError
+
+        try:
+            report = run_v2_mlp_rescue(
+                args.features,
+                args.out_dir,
+                progress_callback=_v2_ml_progress_logger(),
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                patience=args.patience,
+                min_delta=args.min_delta,
+            )
+        except V2MLError as error:
+            print(f"v2 Tiny MLP rescue error: {error}", file=sys.stderr)
+            return 1
+        winner = report["winner"]
+        print(
+            "completed v2 Tiny MLP rescue: "
+            f"winner={winner['variant']} "
+            f"validation_f2={_format_metric(winner['validation_f2'])} "
+            f"validation_fpr={_format_metric(winner['validation_fpr'])} "
+            f"-> {args.out_dir}"
         )
         return 0
 
@@ -870,6 +968,120 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "build-private-real-manifest":
+        from drone_sound.private_real import PrivateRealError, build_private_real_manifest
+
+        try:
+            report = build_private_real_manifest(
+                args.professor_manifest,
+                args.private_audio_root,
+                args.negatives_dir,
+                args.manifest_out,
+                args.audit_out,
+            )
+        except PrivateRealError as error:
+            print(f"private real manifest error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "built private real-only manifest: "
+            f"{report['counts']['positive_windows']} positive + "
+            f"{report['counts']['negative_windows']} negative -> {args.manifest_out}"
+        )
+        return 0
+
+    if args.command == "extract-v2-eval-features":
+        from drone_sound.v2_features import V2FeatureError, build_v2_evaluation_bundle
+
+        if args.progress_every < 0:
+            print("v2 input error: progress-every must be >= 0", file=sys.stderr)
+            return 1
+        try:
+            report = build_v2_evaluation_bundle(
+                args.manifest,
+                args.audio_root,
+                args.feature_set,
+                args.scaler,
+                args.features_out,
+                args.audit_out,
+                progress_callback=_v2_feature_progress_logger(),
+                progress_every=args.progress_every,
+            )
+        except (V2InputError, V2FeatureError) as error:
+            print(f"v2 evaluation feature error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "extracted v2 evaluation-only features: "
+            f"{report['counts']['rows']} rows -> {args.features_out}"
+        )
+        return 0
+
+    if args.command == "eval-real-v2":
+        from drone_sound.v2_ml import V2MLError
+        from drone_sound.v2_real_eval import evaluate_real_v2
+
+        try:
+            report = evaluate_real_v2(
+                args.model,
+                args.features,
+                args.audio_root,
+                args.cache_dir,
+                args.metrics_out,
+                args.export_errors,
+                progress_callback=_v2_ml_progress_logger(),
+                batch_size=args.batch_size,
+            )
+        except V2MLError as error:
+            print(f"v2 real-only evaluation error: {error}", file=sys.stderr)
+            return 1
+        metrics = report["metrics"]
+        print(
+            "evaluated frozen v2 model on real-only test: "
+            f"model={report['model_type']} f2={_format_metric(metrics['f2'])} "
+            f"balanced_accuracy={_format_metric(metrics['balanced_accuracy'])} "
+            f"fpr={_format_metric(metrics['false_positive_rate'])} -> {args.metrics_out}"
+        )
+        return 0
+
+    if args.command == "init-v2-16khz-run":
+        from drone_sound.v2_run import V2RunError, initialize_v2_run
+
+        try:
+            report = initialize_v2_run(
+                args.run_root,
+                args.legacy_root,
+                progress_callback=_v2_run_progress_logger(),
+            )
+        except V2RunError as error:
+            print(f"v2 run error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "initialized isolated v2 16-kHz run: "
+            f"legacy_files={report['legacy_artifacts']['before']['file_count']} "
+            f"-> {args.run_root}"
+        )
+        return 0
+
+    if args.command == "finalize-v2-16khz-run":
+        from drone_sound.v2_run import V2RunError, finalize_v2_run
+
+        try:
+            report = finalize_v2_run(
+                args.run_root,
+                args.legacy_root,
+                args.public_manifest,
+                args.professor_manifest,
+                args.legacy_feature_bundle,
+                progress_callback=_v2_run_progress_logger(),
+            )
+        except V2RunError as error:
+            print(f"v2 run error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "finalized v2 16-kHz run: "
+            f"legacy_unchanged={report['legacy_artifacts']['unchanged']} -> {args.run_root}"
+        )
+        return 0
+
     parser.error(f"unknown command: {args.command}")
     return 2
 
@@ -887,6 +1099,33 @@ def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
         elapsed = _format_duration(time.monotonic() - started_at)
         model_type = event.get("model_type", "unknown")
         event_name = event.get("event")
+        if event_name in {"rescue_candidate_start", "rescue_candidate_complete"}:
+            candidate = int(event["candidate"])
+            candidates = int(event["candidates"])
+            eta = None
+            if event_name == "rescue_candidate_complete" and candidate > 0:
+                elapsed_seconds = time.monotonic() - started_at
+                eta = elapsed_seconds / candidate * (candidates - candidate)
+            print(
+                "v2 ml progress: "
+                f"{event_name} model={model_type} candidate={candidate}/{candidates} "
+                f"elapsed={elapsed} eta={_format_duration(eta)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if event_name in {"real_eval_start", "real_eval_score", "real_eval_complete"}:
+            details = " ".join(
+                f"{key}={value}"
+                for key, value in event.items()
+                if key != "event"
+            )
+            print(
+                f"v2 ml progress: {event_name} {details} elapsed={elapsed}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
         if event_name == "model_start":
             extras = []
             for key in ("epochs", "train_rows", "batch_size", "device"):
@@ -1026,6 +1265,29 @@ def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
                 file=sys.stderr,
                 flush=True,
             )
+
+    return log
+
+
+def _v2_run_progress_logger() -> Callable[[dict[str, Any]], None]:
+    started_at = time.monotonic()
+
+    def log(event: dict[str, Any]) -> None:
+        if event.get("event") != "inventory_progress":
+            return
+        processed = int(event["processed_files"])
+        total = int(event["total_files"])
+        elapsed = max(time.monotonic() - started_at, 0.0)
+        eta = _format_duration(event.get("eta_seconds"))
+        print(
+            "v2 run progress: "
+            f"phase={event['phase']} files={processed}/{total} "
+            f"rate={float(event['rate']):.2f} files/s "
+            f"elapsed={_format_duration(elapsed)} eta={eta} "
+            f"file={Path(str(event['current_file'])).name}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return log
 

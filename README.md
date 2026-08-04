@@ -103,6 +103,16 @@ and ETA while extracting window features.
 
 ## V2A Classical ML Sweep
 
+Canonical reruns use full-recording mono/polyphase resampling at 16 kHz and
+write only below `artifacts/v2_16khz/`. Start with
+`init-v2-16khz-run`; it fails if the namespace exists and records SHA-256 for
+all legacy artifacts. Build the test-only private manifest with
+`build-private-real-manifest`, extract training and frozen-scaler evaluation
+bundles with `extract-v2-features` and `extract-v2-eval-features`, then use
+`eval-real-v2` after each model is frozen. Finish with
+`finalize-v2-16khz-run` to verify legacy hashes and build comparison/provenance
+files. See `docs/stories/US-017-canonical-16khz-v2/` for the locked protocol.
+
 After extracting `spectral_mfcc_v1` features, run the classical ML sweep from
 the feature bundle. Professor rows inside the bundle are evaluation-only and do
 not affect training, threshold tuning, or model selection.
@@ -194,6 +204,17 @@ The combined V1/V2 comparison artifacts are written under
 `artifacts/models/v2_full_comparison/`. V2B/V2C metrics include
 `learning_curve` and `early_stopping` blocks when trained with the current
 commands.
+
+Run the optional canonical Tiny MLP rescue sweep in a fresh, isolated output
+directory. Candidate fitting and selection use public train/validation rows
+only; professor and private-real rows remain post-freeze evaluation data.
+
+```bash
+python -m drone_sound.cli sweep-v2-mlp-rescue \
+  --features artifacts/v2_16khz/features/public_professor_features.npz \
+  --out-dir artifacts/v2_16khz/models/tiny_mlp_rescue \
+  --epochs 20 --patience 4
+```
 
 Combined public-test plus professor-positive metrics are supplementary. Recompute
 them from frozen models without retraining or retuning thresholds:

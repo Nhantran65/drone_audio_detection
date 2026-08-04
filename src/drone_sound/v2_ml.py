@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import copy
+import hashlib
 import json
 import math
 import statistics
@@ -20,6 +21,12 @@ from drone_sound.training import (
     VAL_SPLIT,
     _label_counts,
     _metrics,
+)
+from drone_sound.audio_preprocessing import (
+    CANONICAL_PREPROCESSING_PROFILE,
+    LEGACY_PREPROCESSING_PROFILE,
+    AudioPreprocessingError,
+    require_compatible_preprocessing,
 )
 from drone_sound.v2 import (
     DEPLOYABILITY_LABELS,
@@ -98,9 +105,16 @@ class V2FeatureBundle:
     original_files: tuple[str, ...]
     source_datasets: tuple[str, ...]
     label_subtypes: tuple[str, ...]
+    environments: tuple[str, ...]
     window_start_sec: tuple[float, ...]
     window_end_sec: tuple[float, ...]
     is_professor_data: tuple[bool, ...]
+    source_sample_rates_hz: tuple[int, ...]
+    processed_sample_rates_hz: tuple[int, ...]
+    preprocessing_profile: str
+    processed_sample_rate_hz: int | None
+    bundle_fingerprint: str
+    bundle_schema_version: str
 
     @property
     def row_count(self) -> int:
@@ -144,6 +158,41 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
             is_professor_data = tuple(bool(value) for value in data["is_professor_data"])
             feature_names = _string_tuple(data["feature_names"])
             feature_set = _scalar_string(data["feature_set"])
+            environments = (
+                _string_tuple(data["environments"])
+                if "environments" in data.files
+                else tuple("" for _ in labels)
+            )
+            source_sample_rates_hz = (
+                tuple(int(value) for value in data["source_sample_rates_hz"])
+                if "source_sample_rates_hz" in data.files
+                else tuple(0 for _ in labels)
+            )
+            processed_sample_rates_hz = (
+                tuple(int(value) for value in data["processed_sample_rates_hz"])
+                if "processed_sample_rates_hz" in data.files
+                else tuple(0 for _ in labels)
+            )
+            preprocessing_profile = (
+                _scalar_string(data["preprocessing_profile"])
+                if "preprocessing_profile" in data.files
+                else LEGACY_PREPROCESSING_PROFILE
+            )
+            processed_sample_rate_hz = (
+                int(data["processed_sample_rate_hz"].item())
+                if "processed_sample_rate_hz" in data.files
+                else None
+            )
+            bundle_fingerprint = (
+                _scalar_string(data["bundle_fingerprint"])
+                if "bundle_fingerprint" in data.files
+                else _sha256_file(bundle_path)
+            )
+            bundle_schema_version = (
+                _scalar_string(data["bundle_schema_version"])
+                if "bundle_schema_version" in data.files
+                else "v2_feature_bundle_v1_legacy"
+            )
     except V2MLError:
         raise
     except Exception as error:
@@ -159,13 +208,21 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
     _require_row_length("original_files", original_files, row_count)
     _require_row_length("source_datasets", source_datasets, row_count)
     _require_row_length("label_subtypes", label_subtypes, row_count)
+    _require_row_length("environments", environments, row_count)
     _require_row_length("window_start_sec", window_start_sec, row_count)
     _require_row_length("window_end_sec", window_end_sec, row_count)
     _require_row_length("is_professor_data", is_professor_data, row_count)
+    _require_row_length("source_sample_rates_hz", source_sample_rates_hz, row_count)
+    _require_row_length("processed_sample_rates_hz", processed_sample_rates_hz, row_count)
     if len(feature_names) != features.shape[1]:
         raise V2MLError("feature_names length does not match scaled_features columns")
     if any(label not in {POSITIVE_LABEL, NEGATIVE_LABEL} for label in labels):
         raise V2MLError("feature bundle labels must be drone or no_drone")
+    if preprocessing_profile == CANONICAL_PREPROCESSING_PROFILE:
+        if processed_sample_rate_hz != 16_000:
+            raise V2MLError("canonical feature bundle must declare processed rate 16000 Hz")
+        if set(processed_sample_rates_hz) != {16_000}:
+            raise V2MLError("canonical feature bundle rows must all be processed at 16000 Hz")
 
     return V2FeatureBundle(
         path=bundle_path,
@@ -179,9 +236,16 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
         original_files=original_files,
         source_datasets=source_datasets,
         label_subtypes=label_subtypes,
+        environments=environments,
         window_start_sec=window_start_sec,
         window_end_sec=window_end_sec,
         is_professor_data=is_professor_data,
+        source_sample_rates_hz=source_sample_rates_hz,
+        processed_sample_rates_hz=processed_sample_rates_hz,
+        preprocessing_profile=preprocessing_profile,
+        processed_sample_rate_hz=processed_sample_rate_hz,
+        bundle_fingerprint=bundle_fingerprint,
+        bundle_schema_version=bundle_schema_version,
     )
 
 
@@ -282,6 +346,8 @@ def run_v2a_sweep(
     _, joblib, _ = _require_ml_dependencies()
 
     out_path = Path(out_dir)
+    if out_path.exists():
+        raise V2MLError(f"refusing to overwrite existing V2A output directory: {out_path}")
     model_dir = out_path / "models"
     metrics_dir = out_path / "metrics"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -343,6 +409,9 @@ def run_v2a_sweep(
     }
     comparison = {
         "feature_bundle": str(bundle.path),
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+        "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_set": bundle.feature_set,
         "selection_rule": best_model["selection_rule"],
         "best_model": best_model,
@@ -368,6 +437,15 @@ def train_v2_mlp(
     batch_size: int = V2B_DEFAULT_BATCH_SIZE,
     patience: int = V2B_DEFAULT_PATIENCE,
     min_delta: float = V2_DEFAULT_MIN_DELTA,
+    hidden_layer_sizes: Sequence[int] = (64, 16),
+    activation: str = "relu",
+    alpha: float = 1e-4,
+    learning_rate_init: float = 1e-3,
+    positive_class_weight: float = 1.0,
+    balance_sources: bool = False,
+    feature_noise_std: float = 0.0,
+    random_seed: int = RANDOM_SEED,
+    variant_name: str = "tiny_mlp",
 ) -> dict[str, Any]:
     """Train the V2B Tiny MLP on a V2 engineered feature bundle."""
 
@@ -379,20 +457,49 @@ def train_v2_mlp(
         raise V2MLError("patience must be > 0")
     if min_delta < 0:
         raise V2MLError("min_delta must be >= 0")
+    hidden_layers = tuple(int(size) for size in hidden_layer_sizes)
+    if not hidden_layers or any(size <= 0 for size in hidden_layers):
+        raise V2MLError("hidden_layer_sizes must contain positive integers")
+    if activation not in {"relu", "tanh"}:
+        raise V2MLError("activation must be relu or tanh")
+    if alpha < 0:
+        raise V2MLError("alpha must be >= 0")
+    if learning_rate_init <= 0:
+        raise V2MLError("learning_rate_init must be > 0")
+    if positive_class_weight <= 0:
+        raise V2MLError("positive_class_weight must be > 0")
+    if feature_noise_std < 0:
+        raise V2MLError("feature_noise_std must be >= 0")
+    if not variant_name or any(character.isspace() for character in variant_name):
+        raise V2MLError("variant_name must be a non-empty token without whitespace")
     bundle = load_feature_bundle(features_path)
     _require_feature_set(bundle)
     partitions = _validated_partitions(bundle)
     np, joblib, classes = _require_ml_dependencies()
     train_indices = np.asarray(_row_indices(partitions["train"]), dtype=np.int64)
     train_labels = np.asarray(_labels_for_mask(bundle, partitions["train"]))
+    train_sample_weights = _mlp_training_sample_weights(
+        bundle,
+        train_indices,
+        positive_class_weight=positive_class_weight,
+        balance_sources=balance_sources,
+    )
+    sample_weight_by_row = (
+        {
+            int(row_index): float(train_sample_weights[position])
+            for position, row_index in enumerate(train_indices)
+        }
+        if train_sample_weights is not None
+        else None
+    )
     estimator = classes["MLPClassifier"](
-        hidden_layer_sizes=(64, 16),
-        activation="relu",
+        hidden_layer_sizes=hidden_layers,
+        activation=activation,
         solver="adam",
-        alpha=1e-4,
+        alpha=alpha,
         batch_size=batch_size,
-        learning_rate_init=1e-3,
-        random_state=RANDOM_SEED,
+        learning_rate_init=learning_rate_init,
+        random_state=random_seed,
         max_iter=1,
         warm_start=True,
         shuffle=False,
@@ -404,14 +511,14 @@ def train_v2_mlp(
     no_improvement_epochs = 0
     learning_curve: list[dict[str, Any]] = []
     stopped_epoch: int | None = None
-    rng = np.random.default_rng(RANDOM_SEED)
+    rng = np.random.default_rng(random_seed)
     first_batch = True
     total_batches = math.ceil(len(train_indices) / batch_size)
     if progress_callback is not None:
         progress_callback(
             {
                 "event": "model_start",
-                "model_type": "tiny_mlp",
+                "model_type": variant_name,
                 "epochs": epochs,
                 "train_rows": len(train_indices),
                 "batch_size": batch_size,
@@ -426,8 +533,21 @@ def train_v2_mlp(
         for batch_number, start in enumerate(range(0, len(shuffled), batch_size), start=1):
             batch_indices = shuffled[start : start + batch_size]
             batch_labels = np.asarray([bundle.labels[int(index)] for index in batch_indices])
+            batch_features = bundle.features[batch_indices]
+            if feature_noise_std > 0:
+                batch_features = batch_features + rng.normal(
+                    0.0,
+                    feature_noise_std,
+                    size=batch_features.shape,
+                )
             kwargs = {"classes": class_labels} if first_batch else {}
-            estimator.partial_fit(bundle.features[batch_indices], batch_labels, **kwargs)
+            if sample_weight_by_row is not None:
+                batch_weights = np.asarray(
+                    [sample_weight_by_row[int(index)] for index in batch_indices],
+                    dtype=np.float64,
+                )
+                kwargs["sample_weight"] = batch_weights
+            estimator.partial_fit(batch_features, batch_labels, **kwargs)
             first_batch = False
             loss = float(getattr(estimator, "loss_", 0.0) or 0.0)
             running_loss += loss
@@ -440,7 +560,7 @@ def train_v2_mlp(
                 progress_callback(
                     {
                         "event": "batch_progress",
-                        "model_type": "tiny_mlp",
+                        "model_type": variant_name,
                         "epoch": epoch,
                         "epochs": epochs,
                         "batch": batch_number,
@@ -480,7 +600,7 @@ def train_v2_mlp(
             progress_callback(
                 {
                     "event": "epoch_complete",
-                    "model_type": "tiny_mlp",
+                    "model_type": variant_name,
                     "epoch": epoch,
                     "epochs": epochs,
                     "loss": average_loss,
@@ -496,7 +616,7 @@ def train_v2_mlp(
                 progress_callback(
                     {
                         "event": "early_stop",
-                        "model_type": "tiny_mlp",
+                        "model_type": variant_name,
                         "epoch": epoch,
                         "epochs": epochs,
                         "best_epoch": best_epoch,
@@ -530,8 +650,21 @@ def train_v2_mlp(
         "stopped_epoch": stopped_epoch,
         "stopped_early": stopped_epoch is not None,
     }
+    metrics["training_config"] = {
+        "variant_name": variant_name,
+        "hidden_layer_sizes": list(hidden_layers),
+        "activation": activation,
+        "alpha": alpha,
+        "learning_rate_init": learning_rate_init,
+        "positive_class_weight": positive_class_weight,
+        "balance_sources": balance_sources,
+        "feature_noise_std": feature_noise_std,
+        "random_seed": random_seed,
+        "batch_size": batch_size,
+    }
     output_model = Path(model_out)
     output_metrics = Path(metrics_out)
+    _require_outputs_absent(output_model, output_metrics)
     output_model.parent.mkdir(parents=True, exist_ok=True)
     model_package = _model_package_for_track(
         bundle,
@@ -541,6 +674,7 @@ def train_v2_mlp(
         "v2b_tiny_mlp",
         metrics,
     )
+    model_package["training_config"] = dict(metrics["training_config"])
     joblib.dump(model_package, output_model)
     model_size = output_model.stat().st_size
     metrics["model_path"] = str(output_model)
@@ -552,12 +686,46 @@ def train_v2_mlp(
         progress_callback(
             {
                 "event": "model_complete",
-                "model_type": "tiny_mlp",
+                "model_type": variant_name,
                 "model_path": str(output_model),
                 "metrics_path": str(output_metrics),
             }
         )
     return metrics
+
+
+def _mlp_training_sample_weights(
+    bundle: V2FeatureBundle,
+    train_indices: Any,
+    *,
+    positive_class_weight: float,
+    balance_sources: bool,
+) -> Any | None:
+    """Build deterministic train-only weights without reading evaluation rows."""
+
+    if positive_class_weight == 1.0 and not balance_sources:
+        return None
+    np = _require_numpy()
+    labels = [bundle.labels[int(index)] for index in train_indices]
+    sources = [bundle.source_datasets[int(index)] for index in train_indices]
+    weights = np.ones(len(train_indices), dtype=np.float64)
+    if balance_sources:
+        group_counts: dict[tuple[str, str], int] = {}
+        sources_by_label: dict[str, set[str]] = {}
+        label_counts: dict[str, int] = {}
+        for label, source in zip(labels, sources):
+            group_counts[(label, source)] = group_counts.get((label, source), 0) + 1
+            sources_by_label.setdefault(label, set()).add(source)
+            label_counts[label] = label_counts.get(label, 0) + 1
+        for position, (label, source) in enumerate(zip(labels, sources)):
+            weights[position] *= label_counts[label] / (
+                len(sources_by_label[label]) * group_counts[(label, source)]
+            )
+    if positive_class_weight != 1.0:
+        for position, label in enumerate(labels):
+            if label == POSITIVE_LABEL:
+                weights[position] *= positive_class_weight
+    return weights
 
 
 def evaluate_v2_model(
@@ -600,6 +768,9 @@ def evaluate_v2_model(
         "track": model["track"],
         "feature_set": bundle.feature_set,
         "feature_bundle": str(bundle.path),
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+        "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "model_path": str(Path(model_path)),
         "threshold": threshold,
         "threshold_name": model["threshold_name"],
@@ -688,6 +859,9 @@ def load_v2_model(path: str | Path) -> dict[str, Any]:
         raise V2MLError("V2 model threshold_name must be threshold_f2")
     if model["deployability_label"] not in DEPLOYABILITY_LABELS:
         raise V2MLError("V2 model deployability label is invalid")
+    model.setdefault("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
+    model.setdefault("processed_sample_rate_hz", None)
+    model.setdefault("source_bundle_fingerprint", None)
     return model
 
 
@@ -715,6 +889,9 @@ def _candidate_metrics(
         "track": V2A_TRACK,
         "feature_set": bundle.feature_set,
         "feature_bundle": str(bundle.path),
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+        "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_count": bundle.feature_count,
         "threshold_name": PRIMARY_THRESHOLD_NAME,
         "threshold": threshold,
@@ -799,6 +976,9 @@ def _feature_model_metrics(
         "track": track,
         "feature_set": bundle.feature_set,
         "feature_bundle": str(bundle.path),
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+        "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_count": bundle.feature_count,
         "threshold_name": PRIMARY_THRESHOLD_NAME,
         "threshold": threshold,
@@ -944,6 +1124,9 @@ def _model_package(
         "estimator": estimator,
         "deployability_label": metrics["efficiency"]["deployability_label"],
         "selection": dict(metrics["selection"]),
+        "preprocessing_profile": bundle.preprocessing_profile,
+        "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
+        "source_bundle_fingerprint": bundle.bundle_fingerprint,
     }
 
 
@@ -1479,6 +1662,24 @@ def _require_model_compatible_with_bundle(
     labels = model["labels"]
     if labels.get("positive") != POSITIVE_LABEL or labels.get("negative") != NEGATIVE_LABEL:
         raise V2MLError("model labels do not match V2 label contract")
+    model_profile = str(
+        model.get("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
+    )
+    try:
+        require_compatible_preprocessing(
+            model_profile,
+            bundle.preprocessing_profile,
+            left_name="model",
+            right_name="feature_bundle",
+        )
+    except AudioPreprocessingError as error:
+        raise V2MLError(str(error)) from error
+    model_rate = model.get("processed_sample_rate_hz")
+    if model_rate != bundle.processed_sample_rate_hz:
+        raise V2MLError(
+            "processed sample-rate mismatch: "
+            f"model={model_rate}, feature_bundle={bundle.processed_sample_rate_hz}"
+        )
 
 
 def _require_non_empty_mask(mask: Any, split: str) -> None:
@@ -1603,6 +1804,22 @@ def _write_json(path: Path, data: Mapping[str, Any]) -> None:
         json.dumps(_jsonable(data), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _require_outputs_absent(*paths: Path) -> None:
+    existing = [str(path) for path in paths if path.exists()]
+    if existing:
+        raise V2MLError(
+            "refusing to overwrite existing V2 artifact(s): " + ", ".join(existing)
+        )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _jsonable(value: Any) -> Any:

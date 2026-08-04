@@ -1,0 +1,43 @@
+{
+  "dataset_root": "../data/raw/public/dronenoise_database",
+  "extraction": {
+    "elapsed_seconds": 30.897204926237464,
+    "non_finite_replacements": 0,
+    "skipped_files": []
+  },
+  "feature_count": 100,
+  "feature_set": "spectral_mfcc_v1",
+  "include_calibration": false,
+  "models": {
+    "random_forest": {
+      "detected_windows": 6904,
+      "file_detection_rate": 1.0,
+      "files": 164,
+      "files_with_detection": 164,
+      "score_max": 0.9991196426670736,
+      "score_mean": 0.9168450427670425,
+      "score_median": 0.9669164701072546,
+      "score_p05": 0.6602277429489214,
+      "score_p95": 0.9976136622263428,
+      "threshold": 0.3243004537352851,
+      "window_detection_rate": 0.9953863898500577,
+      "windows": 6936
+    },
+    "tiny_mlp_es": {
+      "detected_windows": 6907,
+      "file_detection_rate": 1.0,
+      "files": 164,
+      "files_with_detection": 164,
+      "score_max": 0.9999999957590149,
+      "score_mean": 0.9690020154278234,
+      "score_median": 0.9981899652711388,
+      "score_p05": 0.8340760184932613,
+      "score_p95": 0.9999868621756869,
+      "threshold": 0.23674599028587018,
+      "window_detection_rate": 0.9958189158016147,
+      "windows": 6936
+    }
+  },
+  "wav_files": 164,
+  "windows": 6936
+}
