@@ -21,6 +21,8 @@ the drone audio classification POC.
   evaluation.
 - `stories/`: implemented feature packets and backlog.
 - `decisions/`: durable decisions and tradeoffs.
+- `reports/`: reader-facing technical summaries of data construction,
+  preprocessing, model evaluation, and limitations.
 - `demo/`: concrete walkthroughs that show how the harness transforms input
   into agent-ready work.
 - `templates/`: reusable spec-intake, story, plan, decision, and validation
