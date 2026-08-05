@@ -216,6 +216,20 @@ python -m drone_sound.cli sweep-v2-mlp-rescue \
   --epochs 20 --patience 4
 ```
 
+Run the bounded lightweight-tree experiment in its own fail-fast namespace.
+It trains three compressed Random Forests, two HistGradientBoosting variants,
+and one shallow XGBoost candidate. One winner per family is selected from
+validation metrics before frozen private-real evaluation:
+
+```bash
+uv run --extra data --extra ml --extra boosting --python 3.13 \
+  python scripts/run_lightweight_tree_experiments.py
+```
+
+Artifacts are written below
+`artifacts/v2_16khz/models/lightweight_tree_experiments/`. The current
+canonical Random Forest artifacts remain unchanged.
+
 Combined public-test plus professor-positive metrics are supplementary. Recompute
 them from frozen models without retraining or retuning thresholds:
 

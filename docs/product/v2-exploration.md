@@ -99,6 +99,30 @@ and smaller model size as tie-breakers.
 and evaluates public test and professor rows from the same feature bundle
 without threshold retuning.
 
+## US-020 Lightweight Tree Efficiency Sweep
+
+The optional `scripts/run_lightweight_tree_experiments.py` command keeps the
+canonical feature bundle, public split assignments, and validation-derived
+`threshold_f2` fixed. It compares a bounded grid rather than performing an
+open-ended hyperparameter search:
+
+```text
+compressed_rf: 3 candidates
+hist_gradient_boosting: 2 candidates
+shallow_xgboost: 1 candidate
+```
+
+One winner per family is selected using validation F2, then validation FPR,
+then serialized model size. Public, professor-positive, and private real-only
+metrics are excluded from selection. Only the three frozen family winners are
+run on private real-only data. Outputs are isolated under
+`artifacts/v2_16khz/models/lightweight_tree_experiments/` and refuse overwrite.
+
+The canonical run found that HistGradientBoosting and XGBoost reduced the
+serialized model artifact below 1 MB while retaining public F2 above 0.994.
+Both lost substantial recall on the single private positive recording, so
+neither is promoted over RF without new recording-level evidence.
+
 ## Selection Rule
 
 Primary model-selection metric:

@@ -5,6 +5,8 @@
 - Research and training stack: PyTorch.
 - V2A classical ML stack: optional scikit-learn plus joblib under the `ml`
   dependency extra.
+- Optional bounded boosted-tree experiments use XGBoost under the separate
+  `boosting` dependency extra; XGBoost is not required by the primary RF path.
 - V2C stack: optional PyTorch plus torchaudio under the `dl` dependency extra.
 - V2D YAMNet stack: optional TensorFlow plus TensorFlow Hub under the
   `embedding` dependency extra, with scikit-learn/joblib under `ml` for the
@@ -67,6 +69,26 @@ public-source balancing, mild feature-noise regularization, and a modest width
 increase. It preserves the current Tiny MLP defaults and all existing artifacts.
 The rescue winner follows the same validation-only selection rule; stress-test
 results cannot override that winner.
+
+US-020 adds a bounded model-efficiency experiment: three compressed Random
+Forests, two HistGradientBoosting candidates, and one shallow XGBoost. Each
+family winner is selected by validation F2, validation FPR, and serialized
+size. Only those three frozen winners are evaluated on private real-only data.
+The XGBoost `.joblib` size excludes the XGBoost native runtime dependency and
+must not be interpreted as total deployment footprint.
+
+The canonical real run selected `compressed_rf_80_d14_leaf5`,
+`hist_gb_leaf31_iter200`, and `xgb_shallow_d4_iter400` within their respective
+families. HistGradientBoosting was the strongest validation candidate
+(F2 0.996006, 920 KB), but its private stress-test recall was 0.760108 versus
+0.824798 for the existing RF. This is a robustness warning, not a test-driven
+selection rule: the existing RF remains the operational baseline until new
+independent positive recordings can validate a replacement.
+
+The accepted operational package is
+`artifacts/v2_16khz/models/v2a/models/random_forest.joblib` with canonical
+16 kHz preprocessing and its frozen validation-selected `threshold_f2`. See
+`docs/decisions/0017-keep-canonical-random-forest-operational.md`.
 
 ## V2.1 Stop Criteria
 
