@@ -90,6 +90,16 @@ The accepted operational package is
 16 kHz preprocessing and its frozen validation-selected `threshold_f2`. See
 `docs/decisions/0017-keep-canonical-random-forest-operational.md`.
 
+## V3 Group-aware Training
+
+V3 keeps canonical 16 kHz preprocessing, windowing, engineered features, and
+architectures fixed while replacing the split with versioned recording-session
+groups. The scaler is refit on V3 train only. Natural and hierarchical
+class/dataset/group weighting are treated as separate validation candidates;
+weighting is not assumed to help every model family. V3 freezes the validation
+F1 threshold as primary while retaining the validation-frozen F2 threshold for
+recall-oriented reporting.
+
 ## V2.1 Stop Criteria
 
 Stop and report if any deployable lightweight V2A/V2B/V2C candidate achieves:

@@ -178,6 +178,17 @@ python -m drone_sound.cli eval-v2-cnn \
 Both frozen V2 evaluators write a `combined_supplementary` block for
 public-test plus professor-positive metrics.
 
+## V3 Frozen Evaluation
+
+`eval-v3` evaluates a frozen V3 model on the group-held-out public test and the
+professor-positive recording. It reports both frozen F1/F2 thresholds,
+per-dataset and per-group diagnostics, and group-cluster bootstrap intervals.
+`eval-real-v2` remains the external private-real evaluator and accepts V3 model
+packages when its evaluation bundle was transformed with the matching V3 scaler.
+Neither evaluator may fit, tune a threshold, or select a model. The private-real
+benchmark is a stress test, not a pristine blind estimate, because it has one
+positive recording and has informed prior research iterations.
+
 ## V2.1 Comparison Output
 
 The final V2 comparison table should include:

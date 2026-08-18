@@ -32,8 +32,11 @@ from drone_sound.v2_ml import (
     _metric_sort_value,
     _professor_metrics,
     _row_indices,
+    _validate_primary_threshold_name,
     _validated_partitions,
+    hierarchical_sample_weights,
     load_feature_bundle,
+    metrics_by_dataset,
     select_thresholds,
 )
 from drone_sound.wav_audio import WavReadError, read_wav_mono_array
@@ -65,6 +68,9 @@ def train_v2_cnn(
     batch_size: int = V2C_DEFAULT_BATCH_SIZE,
     patience: int = V2C_DEFAULT_PATIENCE,
     min_delta: float = V2_DEFAULT_MIN_DELTA,
+    balance_groups: bool = False,
+    random_seed: int = RANDOM_SEED,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     """Train V2C Tiny CNN on cached log-mel windows."""
 
@@ -76,7 +82,11 @@ def train_v2_cnn(
         raise V2MLError("patience must be > 0")
     if min_delta < 0:
         raise V2MLError("min_delta must be >= 0")
+    _validate_primary_threshold_name(primary_threshold_name)
     np, torch, _, _ = _require_dl_dependencies()
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
     bundle = load_feature_bundle(features_path)
     partitions = _validated_partitions(bundle)
     cache = _logmel_cache(
@@ -94,13 +104,21 @@ def train_v2_cnn(
     positive_count = int((train_labels == 1).sum())
     negative_count = int((train_labels == 0).sum())
     pos_weight = torch.tensor(
-        [negative_count / max(positive_count, 1)],
-        dtype=torch.float32,
-        device=device,
+        [negative_count / max(positive_count, 1)], dtype=torch.float32, device=device
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    rng = np.random.default_rng(RANDOM_SEED)
+    criterion = torch.nn.BCEWithLogitsLoss(
+        pos_weight=None if balance_groups else pos_weight,
+        reduction="none" if balance_groups else "mean",
+    )
+    weight_by_row = None
+    if balance_groups:
+        train_weights = hierarchical_sample_weights(bundle, partitions["train"])
+        weight_by_row = {
+            int(row): float(train_weights[position])
+            for position, row in enumerate(train_indices)
+        }
+    rng = np.random.default_rng(random_seed)
     total_batches = math.ceil(len(train_indices) / batch_size)
     if progress_callback is not None:
         progress_callback(
@@ -132,7 +150,16 @@ def train_v2_cnn(
             y = torch.as_tensor(labels[batch_indices], dtype=torch.float32, device=device)
             optimizer.zero_grad(set_to_none=True)
             logits = model(x).reshape(-1)
-            loss = criterion(logits, y)
+            loss_values = criterion(logits, y)
+            if weight_by_row is not None:
+                batch_weights = torch.as_tensor(
+                    [weight_by_row[int(index)] for index in batch_indices],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                loss = (loss_values * batch_weights).mean()
+            else:
+                loss = loss_values
             loss.backward()
             optimizer.step()
             loss_value = float(loss.detach().cpu())
@@ -157,10 +184,11 @@ def train_v2_cnn(
         val_scores = _torch_scores(torch, model, cache, _row_indices(partitions["val"]), batch_size, device)
         val_labels = _labels_for_mask(bundle, partitions["val"])
         thresholds = select_thresholds(val_labels, val_scores)
-        threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+        threshold = thresholds[primary_threshold_name]
         val_metrics = _metrics(val_labels, val_scores, threshold)
+        primary_metric = "f1" if primary_threshold_name == "threshold_f1" else "f2"
         key = (
-            _metric_sort_value(val_metrics["f2"]),
+            _metric_sort_value(val_metrics[primary_metric]),
             -_metric_sort_value(val_metrics["false_positive_rate"], missing=1.0),
         )
         improved = _early_stopping_improved(key, best_key, min_delta)
@@ -180,8 +208,12 @@ def train_v2_cnn(
                 "epoch": epoch,
                 "training_loss": average_loss,
                 "validation_f2": val_metrics["f2"],
+                "validation_f1": val_metrics["f1"],
                 "validation_fpr": val_metrics["false_positive_rate"],
-                "threshold_f2": threshold,
+                "primary_threshold_name": primary_threshold_name,
+                "primary_threshold": threshold,
+                "threshold_f1": thresholds["threshold_f1"],
+                "threshold_f2": thresholds["threshold_f2"],
                 "is_best": improved,
             }
         )
@@ -194,6 +226,8 @@ def train_v2_cnn(
                     "epochs": epochs,
                     "loss": average_loss,
                     "validation_f2": val_metrics["f2"],
+                    "validation_f1": val_metrics["f1"],
+                    "primary_metric": primary_metric,
                     "validation_fpr": val_metrics["false_positive_rate"],
                     "improved": improved,
                     "best_epoch": best_epoch,
@@ -229,6 +263,7 @@ def train_v2_cnn(
         device,
         runtime_dependency="torch",
         deployability_label="maybe_deployable",
+        primary_threshold_name=primary_threshold_name,
     )
     metrics["learning_curve"] = learning_curve
     metrics["early_stopping"] = {
@@ -240,6 +275,13 @@ def train_v2_cnn(
         "best_epoch": best_epoch,
         "stopped_epoch": stopped_epoch,
         "stopped_early": stopped_epoch is not None,
+    }
+    metrics["training_config"] = {
+        "balance_groups": balance_groups,
+        "weighting": "class_dataset_group_equal" if balance_groups else "natural_class_balanced",
+        "primary_threshold_name": primary_threshold_name,
+        "random_seed": random_seed,
+        "batch_size": batch_size,
     }
     output_model = Path(model_out)
     output_metrics = Path(metrics_out)
@@ -262,6 +304,9 @@ def train_v2_cnn(
             "preprocessing_profile": bundle.preprocessing_profile,
             "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
             "source_bundle_fingerprint": bundle.bundle_fingerprint,
+            "split_version": bundle.split_version,
+            "group_parser_version": bundle.group_parser_version,
+            "training_config": dict(metrics["training_config"]),
         },
         output_model,
     )
@@ -697,12 +742,14 @@ def _torch_metrics(
     *,
     runtime_dependency: str,
     deployability_label: str,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     _, torch, _, _ = _require_dl_dependencies()
     val_scores = _torch_scores(torch, model, cache, _row_indices(partitions["val"]), batch_size, device)
     val_labels = _labels_for_mask(bundle, partitions["val"])
     thresholds = select_thresholds(val_labels, val_scores)
-    threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+    _validate_primary_threshold_name(primary_threshold_name)
+    threshold = thresholds[primary_threshold_name]
     started_at = time.perf_counter()
     public_scores = _torch_scores(torch, model, cache, _row_indices(partitions["public_test"]), batch_size, device)
     elapsed = time.perf_counter() - started_at
@@ -728,6 +775,7 @@ def _torch_metrics(
         inference_time=elapsed / max(len(public_scores), 1),
         runtime_dependency=runtime_dependency,
         deployability_label=deployability_label,
+        primary_threshold_name=primary_threshold_name,
     )
 
 
@@ -751,6 +799,7 @@ def _metrics_report(
     inference_time: float,
     runtime_dependency: str,
     deployability_label: str,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     return {
         "schema_version": "v2_metrics_v1",
@@ -760,13 +809,20 @@ def _metrics_report(
         "feature_set": feature_set,
         "source_feature_bundle": str(bundle.path),
         "feature_count": feature_count,
-        "threshold_name": PRIMARY_THRESHOLD_NAME,
+        "threshold_name": primary_threshold_name,
         "threshold": threshold,
         "thresholds": dict(thresholds),
-        "training": {"counts": _counts_for_mask(bundle, partitions["train"])},
+        "training": {
+            "counts": _counts_for_mask(bundle, partitions["train"]),
+            "split_version": bundle.split_version,
+            "group_parser_version": bundle.group_parser_version,
+        },
         "validation": {
             "counts": _counts_for_mask(bundle, partitions["val"]),
             "primary": _metrics(val_labels, val_scores, threshold),
+            "per_dataset": metrics_by_dataset(
+                bundle, partitions["val"], val_scores, threshold
+            ),
             "metrics_by_threshold": {
                 name: _metrics(val_labels, val_scores, value)
                 for name, value in thresholds.items()
@@ -806,8 +862,12 @@ def _metrics_report(
         },
         "selection": {
             "uses_professor_data": False,
-            "primary_metric": "validation.f2",
-            "primary_threshold": PRIMARY_THRESHOLD_NAME,
+            "primary_metric": (
+                "validation.f1"
+                if primary_threshold_name == "threshold_f1"
+                else "validation.f2"
+            ),
+            "primary_threshold": primary_threshold_name,
         },
         "limitations": [
             "Professor data is positive-only or near-positive-only evaluation data.",
@@ -911,8 +971,8 @@ def _validate_torch_checkpoint(checkpoint: Any) -> None:
         raise V2MLError("V2C track must be v2c")
     if checkpoint["feature_set"] != LOGMEL_FEATURE_SET:
         raise V2MLError(f"V2C feature_set must be {LOGMEL_FEATURE_SET}")
-    if checkpoint["threshold_name"] != PRIMARY_THRESHOLD_NAME:
-        raise V2MLError("V2C model threshold_name must be threshold_f2")
+    if checkpoint["threshold_name"] not in {"threshold_f1", "threshold_f2"}:
+        raise V2MLError("V2C model threshold_name must be threshold_f1 or threshold_f2")
     checkpoint.setdefault("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
     checkpoint.setdefault("processed_sample_rate_hz", None)
     checkpoint.setdefault("source_bundle_fingerprint", None)

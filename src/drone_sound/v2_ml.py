@@ -9,6 +9,7 @@ import json
 import math
 import statistics
 import time
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -71,6 +72,7 @@ COMPARISON_COLUMNS = (
     "model",
     "track",
     "feature/input",
+    "validation_f1",
     "validation_f2",
     "validation_fpr",
     "public_f2",
@@ -104,6 +106,7 @@ class V2FeatureBundle:
     clip_ids: tuple[str, ...]
     original_files: tuple[str, ...]
     source_datasets: tuple[str, ...]
+    group_ids: tuple[str, ...]
     label_subtypes: tuple[str, ...]
     environments: tuple[str, ...]
     window_start_sec: tuple[float, ...]
@@ -115,6 +118,8 @@ class V2FeatureBundle:
     processed_sample_rate_hz: int | None
     bundle_fingerprint: str
     bundle_schema_version: str
+    split_version: str
+    group_parser_version: str
 
     @property
     def row_count(self) -> int:
@@ -152,6 +157,11 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
             clip_ids = _string_tuple(data["clip_ids"])
             original_files = _string_tuple(data["original_files"])
             source_datasets = _string_tuple(data["source_datasets"])
+            group_ids = (
+                _string_tuple(data["group_ids"])
+                if "group_ids" in data.files
+                else original_files
+            )
             label_subtypes = _string_tuple(data["label_subtypes"])
             window_start_sec = tuple(float(value) for value in data["window_start_sec"])
             window_end_sec = tuple(float(value) for value in data["window_end_sec"])
@@ -193,6 +203,16 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
                 if "bundle_schema_version" in data.files
                 else "v2_feature_bundle_v1_legacy"
             )
+            split_version = (
+                _scalar_string(data["split_version"])
+                if "split_version" in data.files
+                else "legacy_file_split_v1"
+            )
+            group_parser_version = (
+                _scalar_string(data["group_parser_version"])
+                if "group_parser_version" in data.files
+                else "original_file_v1"
+            )
     except V2MLError:
         raise
     except Exception as error:
@@ -207,6 +227,7 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
     _require_row_length("clip_ids", clip_ids, row_count)
     _require_row_length("original_files", original_files, row_count)
     _require_row_length("source_datasets", source_datasets, row_count)
+    _require_row_length("group_ids", group_ids, row_count)
     _require_row_length("label_subtypes", label_subtypes, row_count)
     _require_row_length("environments", environments, row_count)
     _require_row_length("window_start_sec", window_start_sec, row_count)
@@ -235,6 +256,7 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
         clip_ids=clip_ids,
         original_files=original_files,
         source_datasets=source_datasets,
+        group_ids=group_ids,
         label_subtypes=label_subtypes,
         environments=environments,
         window_start_sec=window_start_sec,
@@ -246,6 +268,8 @@ def load_feature_bundle(path: str | Path) -> V2FeatureBundle:
         processed_sample_rate_hz=processed_sample_rate_hz,
         bundle_fingerprint=bundle_fingerprint,
         bundle_schema_version=bundle_schema_version,
+        split_version=split_version,
+        group_parser_version=group_parser_version,
     )
 
 
@@ -330,10 +354,14 @@ def run_v2a_sweep(
     model_types: Iterable[str],
     out_dir: str | Path,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    balance_groups: bool = False,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     """Train V2A candidates and write model, metrics, and comparison artifacts."""
 
     requested = validate_model_types(model_types)
+    _validate_primary_threshold_name(primary_threshold_name)
     if not requested:
         raise V2MLError("at least one V2A model type is required")
     unsupported = [model_type for model_type in requested if model_type not in V2A_MODEL_TYPES]
@@ -358,12 +386,32 @@ def run_v2a_sweep(
     for model_type in requested:
         if progress_callback is not None:
             progress_callback({"event": "model_start", "model_type": model_type})
-        estimator = _fit_estimator(model_type, bundle, partitions["train"])
+        sample_weights = (
+            hierarchical_sample_weights(bundle, partitions["train"])
+            if balance_groups
+            else None
+        )
+        estimator = _fit_estimator(
+            model_type,
+            bundle,
+            partitions["train"],
+            sample_weights=sample_weights,
+        )
         if progress_callback is not None:
             progress_callback({"event": "model_fit_complete", "model_type": model_type})
         model_path = model_dir / f"{model_type}.joblib"
         metrics_path = metrics_dir / f"{model_type}.json"
-        metrics = _candidate_metrics(bundle, estimator, model_type, partitions)
+        metrics = _candidate_metrics(
+            bundle,
+            estimator,
+            model_type,
+            partitions,
+            primary_threshold_name=primary_threshold_name,
+        )
+        metrics["training_config"] = {
+            "balance_groups": balance_groups,
+            "weighting": "class_dataset_group_equal" if balance_groups else "natural",
+        }
         model_package = _model_package(bundle, estimator, model_type, metrics)
         joblib.dump(model_package, model_path)
         model_size = model_path.stat().st_size
@@ -388,15 +436,19 @@ def run_v2a_sweep(
     best_row = max(
         comparison_rows,
         key=lambda row: (
-            _metric_sort_value(row["validation_f2"]),
+            _metric_sort_value(
+                row["validation_f1"]
+                if primary_threshold_name == "threshold_f1"
+                else row["validation_f2"]
+            ),
             -_metric_sort_value(row["validation_fpr"], missing=1.0),
             -int(row["model_size_bytes"]),
         ),
     )
     best_model = {
         "selection_rule": (
-            "highest validation F2 at threshold_f2; ties use lower validation FPR "
-            "then smaller model size"
+            f"highest validation {'F1' if primary_threshold_name == 'threshold_f1' else 'F2'} "
+            f"at {primary_threshold_name}; ties use lower validation FPR then smaller model size"
         ),
         "selected_model": best_row["model"],
         "model_path": best_row["model_path"],
@@ -413,6 +465,10 @@ def run_v2a_sweep(
         "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
         "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_set": bundle.feature_set,
+        "split_version": bundle.split_version,
+        "group_parser_version": bundle.group_parser_version,
+        "balance_groups": balance_groups,
+        "primary_threshold_name": primary_threshold_name,
         "selection_rule": best_model["selection_rule"],
         "best_model": best_model,
         "candidates": [
@@ -443,9 +499,11 @@ def train_v2_mlp(
     learning_rate_init: float = 1e-3,
     positive_class_weight: float = 1.0,
     balance_sources: bool = False,
+    balance_groups: bool = False,
     feature_noise_std: float = 0.0,
     random_seed: int = RANDOM_SEED,
     variant_name: str = "tiny_mlp",
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     """Train the V2B Tiny MLP on a V2 engineered feature bundle."""
 
@@ -472,6 +530,7 @@ def train_v2_mlp(
         raise V2MLError("feature_noise_std must be >= 0")
     if not variant_name or any(character.isspace() for character in variant_name):
         raise V2MLError("variant_name must be a non-empty token without whitespace")
+    _validate_primary_threshold_name(primary_threshold_name)
     bundle = load_feature_bundle(features_path)
     _require_feature_set(bundle)
     partitions = _validated_partitions(bundle)
@@ -483,6 +542,7 @@ def train_v2_mlp(
         train_indices,
         positive_class_weight=positive_class_weight,
         balance_sources=balance_sources,
+        balance_groups=balance_groups,
     )
     sample_weight_by_row = (
         {
@@ -571,10 +631,11 @@ def train_v2_mlp(
         val_scores = _score_estimator(estimator, bundle.features[partitions["val"]])
         val_labels = _labels_for_mask(bundle, partitions["val"])
         thresholds = select_thresholds(val_labels, val_scores)
-        threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+        threshold = thresholds[primary_threshold_name]
         val_metrics = _metrics(val_labels, val_scores, threshold)
+        primary_metric = "f1" if primary_threshold_name == "threshold_f1" else "f2"
         key = (
-            _metric_sort_value(val_metrics["f2"]),
+            _metric_sort_value(val_metrics[primary_metric]),
             -_metric_sort_value(val_metrics["false_positive_rate"], missing=1.0),
         )
         improved = _early_stopping_improved(key, best_key, min_delta)
@@ -591,8 +652,9 @@ def train_v2_mlp(
                 "epoch": epoch,
                 "training_loss": average_loss,
                 "validation_f2": val_metrics["f2"],
+                "validation_f1": val_metrics["f1"],
                 "validation_fpr": val_metrics["false_positive_rate"],
-                "threshold_f2": threshold,
+                primary_threshold_name: threshold,
                 "is_best": improved,
             }
         )
@@ -605,6 +667,7 @@ def train_v2_mlp(
                     "epochs": epochs,
                     "loss": average_loss,
                     "validation_f2": val_metrics["f2"],
+                    "validation_f1": val_metrics["f1"],
                     "validation_fpr": val_metrics["false_positive_rate"],
                     "improved": improved,
                     "best_epoch": best_epoch,
@@ -638,6 +701,7 @@ def train_v2_mlp(
         partitions,
         runtime_dependency="scikit-learn",
         deployability_label="deployable_lightweight",
+        primary_threshold_name=primary_threshold_name,
     )
     metrics["learning_curve"] = learning_curve
     metrics["early_stopping"] = {
@@ -662,6 +726,11 @@ def train_v2_mlp(
         "random_seed": random_seed,
         "batch_size": batch_size,
     }
+    if balance_groups:
+        metrics["training_config"]["balance_groups"] = True
+        metrics["training_config"]["weighting"] = "class_dataset_group_equal"
+    if primary_threshold_name != PRIMARY_THRESHOLD_NAME:
+        metrics["training_config"]["primary_threshold_name"] = primary_threshold_name
     output_model = Path(model_out)
     output_metrics = Path(metrics_out)
     _require_outputs_absent(output_model, output_metrics)
@@ -700,16 +769,21 @@ def _mlp_training_sample_weights(
     *,
     positive_class_weight: float,
     balance_sources: bool,
+    balance_groups: bool = False,
 ) -> Any | None:
     """Build deterministic train-only weights without reading evaluation rows."""
 
-    if positive_class_weight == 1.0 and not balance_sources:
+    if positive_class_weight == 1.0 and not balance_sources and not balance_groups:
         return None
     np = _require_numpy()
     labels = [bundle.labels[int(index)] for index in train_indices]
     sources = [bundle.source_datasets[int(index)] for index in train_indices]
     weights = np.ones(len(train_indices), dtype=np.float64)
-    if balance_sources:
+    if balance_groups:
+        mask = np.zeros(bundle.row_count, dtype=bool)
+        mask[train_indices] = True
+        weights = hierarchical_sample_weights(bundle, mask)
+    elif balance_sources:
         group_counts: dict[tuple[str, str], int] = {}
         sources_by_label: dict[str, set[str]] = {}
         label_counts: dict[str, int] = {}
@@ -855,8 +929,7 @@ def load_v2_model(path: str | Path) -> dict[str, Any]:
         raise V2MLError(f"V2 model artifact missing keys: {', '.join(missing)}")
     if model["schema_version"] != MODEL_SCHEMA_VERSION:
         raise V2MLError(f"unsupported V2 model schema: {model['schema_version']}")
-    if model["threshold_name"] != PRIMARY_THRESHOLD_NAME:
-        raise V2MLError("V2 model threshold_name must be threshold_f2")
+    _validate_primary_threshold_name(str(model["threshold_name"]))
     if model["deployability_label"] not in DEPLOYABILITY_LABELS:
         raise V2MLError("V2 model deployability label is invalid")
     model.setdefault("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
@@ -870,11 +943,14 @@ def _candidate_metrics(
     estimator: Any,
     model_type: str,
     partitions: Mapping[str, Any],
+    *,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     val_scores = _score_estimator(estimator, bundle.features[partitions["val"]])
     val_labels = _labels_for_mask(bundle, partitions["val"])
     thresholds = select_thresholds(val_labels, val_scores)
-    threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+    _validate_primary_threshold_name(primary_threshold_name)
+    threshold = thresholds[primary_threshold_name]
     public_scores, inference = _score_with_timing(
         estimator,
         bundle.features[partitions["public_test"]],
@@ -893,15 +969,20 @@ def _candidate_metrics(
         "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
         "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_count": bundle.feature_count,
-        "threshold_name": PRIMARY_THRESHOLD_NAME,
+        "threshold_name": primary_threshold_name,
         "threshold": threshold,
         "thresholds": thresholds,
         "training": {
             "counts": _counts_for_mask(bundle, partitions["train"]),
+            "split_version": bundle.split_version,
+            "group_parser_version": bundle.group_parser_version,
         },
         "validation": {
             "counts": _counts_for_mask(bundle, partitions["val"]),
             "primary": _metrics(val_labels, val_scores, threshold),
+            "per_dataset": metrics_by_dataset(
+                bundle, partitions["val"], val_scores, threshold
+            ),
             "metrics_by_threshold": {
                 name: _metrics(val_labels, val_scores, value)
                 for name, value in thresholds.items()
@@ -941,8 +1022,12 @@ def _candidate_metrics(
         },
         "selection": {
             "uses_professor_data": False,
-            "primary_metric": "validation.f2",
-            "primary_threshold": PRIMARY_THRESHOLD_NAME,
+            "primary_metric": (
+                "validation.f1"
+                if primary_threshold_name == "threshold_f1"
+                else "validation.f2"
+            ),
+            "primary_threshold": primary_threshold_name,
         },
     }
 
@@ -957,11 +1042,13 @@ def _feature_model_metrics(
     *,
     runtime_dependency: str,
     deployability_label: str,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     val_scores = _score_estimator(estimator, bundle.features[partitions["val"]])
     val_labels = _labels_for_mask(bundle, partitions["val"])
     thresholds = select_thresholds(val_labels, val_scores)
-    threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+    _validate_primary_threshold_name(primary_threshold_name)
+    threshold = thresholds[primary_threshold_name]
     public_scores, inference = _score_with_timing(
         estimator,
         bundle.features[partitions["public_test"]],
@@ -980,15 +1067,20 @@ def _feature_model_metrics(
         "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
         "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_count": bundle.feature_count,
-        "threshold_name": PRIMARY_THRESHOLD_NAME,
+        "threshold_name": primary_threshold_name,
         "threshold": threshold,
         "thresholds": thresholds,
         "training": {
             "counts": _counts_for_mask(bundle, partitions["train"]),
+            "split_version": bundle.split_version,
+            "group_parser_version": bundle.group_parser_version,
         },
         "validation": {
             "counts": _counts_for_mask(bundle, partitions["val"]),
             "primary": _metrics(val_labels, val_scores, threshold),
+            "per_dataset": metrics_by_dataset(
+                bundle, partitions["val"], val_scores, threshold
+            ),
             "metrics_by_threshold": {
                 name: _metrics(val_labels, val_scores, value)
                 for name, value in thresholds.items()
@@ -1028,19 +1120,29 @@ def _feature_model_metrics(
         },
         "selection": {
             "uses_professor_data": False,
-            "primary_metric": "validation.f2",
-            "primary_threshold": PRIMARY_THRESHOLD_NAME,
+            "primary_metric": (
+                "validation.f1"
+                if primary_threshold_name == "threshold_f1"
+                else "validation.f2"
+            ),
+            "primary_threshold": primary_threshold_name,
         },
     }
 
 
-def _fit_estimator(model_type: str, bundle: V2FeatureBundle, train_mask: Any) -> Any:
+def _fit_estimator(
+    model_type: str,
+    bundle: V2FeatureBundle,
+    train_mask: Any,
+    *,
+    sample_weights: Any | None = None,
+) -> Any:
     _, _, classes = _require_ml_dependencies()
     labels = _labels_for_mask(bundle, train_mask)
     features = bundle.features[train_mask]
     if model_type == "logistic_regression":
         estimator = classes["LogisticRegression"](
-            class_weight="balanced",
+            class_weight=None if sample_weights is not None else "balanced",
             max_iter=300,
             random_state=RANDOM_SEED,
             solver="saga",
@@ -1052,7 +1154,7 @@ def _fit_estimator(model_type: str, bundle: V2FeatureBundle, train_mask: Any) ->
             raise V2MLError("linear_svm calibration requires at least two rows per class")
         estimator = classes["CalibratedClassifierCV"](
             estimator=classes["LinearSVC"](
-                class_weight="balanced",
+                class_weight=None if sample_weights is not None else "balanced",
                 dual="auto",
                 max_iter=2_000,
                 random_state=RANDOM_SEED,
@@ -1067,7 +1169,7 @@ def _fit_estimator(model_type: str, bundle: V2FeatureBundle, train_mask: Any) ->
             max_depth=16,
             min_samples_leaf=5,
             max_features="sqrt",
-            class_weight="balanced_subsample",
+            class_weight=None if sample_weights is not None else "balanced_subsample",
             n_jobs=-1,
             random_state=RANDOM_SEED,
         )
@@ -1077,14 +1179,75 @@ def _fit_estimator(model_type: str, bundle: V2FeatureBundle, train_mask: Any) ->
             max_depth=16,
             min_samples_leaf=5,
             max_features="sqrt",
-            class_weight="balanced",
+            class_weight=None if sample_weights is not None else "balanced",
             n_jobs=-1,
             random_state=RANDOM_SEED,
         )
     else:
         raise V2MLError(f"unsupported V2A model type: {model_type}")
-    estimator.fit(features, labels)
+    fit_kwargs = {"sample_weight": sample_weights} if sample_weights is not None else {}
+    estimator.fit(features, labels, **fit_kwargs)
     return estimator
+
+
+def hierarchical_sample_weights(bundle: V2FeatureBundle, train_mask: Any) -> Any:
+    """Equalize class, dataset, and recording-group contribution on train rows."""
+
+    np = _require_numpy()
+    indices = np.asarray(_row_indices(train_mask), dtype=np.int64)
+    if indices.size == 0:
+        raise V2MLError("cannot compute hierarchical weights without train rows")
+    labels = [bundle.labels[int(index)] for index in indices]
+    sources = [bundle.source_datasets[int(index)] for index in indices]
+    groups = [bundle.group_ids[int(index)] for index in indices]
+    labels_present = sorted(set(labels))
+    if set(labels_present) != {NEGATIVE_LABEL, POSITIVE_LABEL}:
+        raise V2MLError("hierarchical weighting requires both binary labels")
+    sources_by_label: dict[str, set[str]] = defaultdict(set)
+    groups_by_source: dict[tuple[str, str], set[str]] = defaultdict(set)
+    rows_by_group: Counter[tuple[str, str, str]] = Counter()
+    for label, source, group in zip(labels, sources, groups):
+        sources_by_label[label].add(source)
+        groups_by_source[(label, source)].add(group)
+        rows_by_group[(label, source, group)] += 1
+    total = float(len(indices))
+    weights = np.empty(len(indices), dtype=np.float64)
+    for position, (label, source, group) in enumerate(zip(labels, sources, groups)):
+        weights[position] = total / (
+            len(labels_present)
+            * len(sources_by_label[label])
+            * len(groups_by_source[(label, source)])
+            * rows_by_group[(label, source, group)]
+        )
+    weights /= float(np.mean(weights))
+    return weights
+
+
+def metrics_by_dataset(
+    bundle: V2FeatureBundle,
+    mask: Any,
+    scores: Sequence[float],
+    threshold: float,
+) -> dict[str, Any]:
+    """Report a frozen threshold separately for each dataset in a partition."""
+
+    indices = _row_indices(mask)
+    if len(indices) != len(scores):
+        raise V2MLError("per-dataset metrics require one score per selected row")
+    positions: dict[str, list[int]] = defaultdict(list)
+    for position, row_index in enumerate(indices):
+        positions[bundle.source_datasets[row_index]].append(position)
+    output = {}
+    for dataset, selected in sorted(positions.items()):
+        labels = [bundle.labels[indices[position]] for position in selected]
+        values = [float(scores[position]) for position in selected]
+        output[dataset] = {
+            "groups": len(
+                {bundle.group_ids[indices[position]] for position in selected}
+            ),
+            "metrics": _metrics(labels, values, threshold),
+        }
+    return output
 
 
 def _early_stopping_improved(
@@ -1127,6 +1290,8 @@ def _model_package(
         "preprocessing_profile": bundle.preprocessing_profile,
         "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
         "source_bundle_fingerprint": bundle.bundle_fingerprint,
+        "split_version": bundle.split_version,
+        "group_parser_version": bundle.group_parser_version,
     }
 
 
@@ -1602,6 +1767,7 @@ def _comparison_row(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "model": metrics["model_type"],
         "track": metrics["track"],
         "feature/input": metrics["feature_set"],
+        "validation_f1": metrics["validation"]["primary"]["f1"],
         "validation_f2": metrics["validation"]["primary"]["f2"],
         "validation_fpr": metrics["validation"]["primary"]["false_positive_rate"],
         "public_f2": public_metrics["f2"],
@@ -1619,6 +1785,12 @@ def _comparison_row(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "metrics_path": metrics["metrics_path"],
     }
     return row
+
+
+def _validate_primary_threshold_name(value: str) -> str:
+    if value not in {"threshold_f1", "threshold_f2"}:
+        raise V2MLError("primary threshold must be threshold_f1 or threshold_f2")
+    return value
 
 
 def _write_comparison_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:

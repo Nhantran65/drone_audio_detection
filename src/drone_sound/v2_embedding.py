@@ -35,9 +35,12 @@ from drone_sound.v2_ml import (
     _score_estimator_with_progress,
     _score_with_timing,
     _tree_node_count,
+    _validate_primary_threshold_name,
     _validated_partitions,
     _write_json,
     load_feature_bundle,
+    metrics_by_dataset,
+    hierarchical_sample_weights,
     select_thresholds,
 )
 from drone_sound.wav_audio import WavReadError, read_wav_mono_array
@@ -72,6 +75,8 @@ def train_v2_embedding(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     epochs: int = DEFAULT_EPOCHS,
+    balance_groups: bool = False,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     """Train the V2D YAMNet embedding head from an existing V2 feature bundle."""
 
@@ -83,6 +88,7 @@ def train_v2_embedding(
         raise V2MLError("batch size must be > 0")
     if epochs <= 0:
         raise V2MLError("epochs must be > 0")
+    _validate_primary_threshold_name(primary_threshold_name)
 
     bundle = load_feature_bundle(features_path)
     partitions = _validated_partitions(bundle)
@@ -100,13 +106,24 @@ def train_v2_embedding(
         partitions["train"],
         max_iter=max(100, epochs * 100),
         progress_callback=progress_callback,
+        balance_groups=balance_groups,
     )
-    metrics = _embedding_metrics(bundle, embeddings, estimator, partitions, cache_report)
+    metrics = _embedding_metrics(
+        bundle,
+        embeddings,
+        estimator,
+        partitions,
+        cache_report,
+        primary_threshold_name=primary_threshold_name,
+    )
     metrics["head_training"] = {
         "head": head,
         "max_iter": max(100, epochs * 100),
         "requested_epochs": epochs,
         "train_rows": int(partitions["train"].sum()),
+        "balance_groups": balance_groups,
+        "weighting": "class_dataset_group_equal" if balance_groups else "natural_class_balanced",
+        "primary_threshold_name": primary_threshold_name,
     }
 
     output_model = Path(model_out)
@@ -284,8 +301,8 @@ def load_v2_embedding_model(path: str | Path) -> dict[str, Any]:
         raise V2MLError(f"unsupported V2D track: {model['track']}")
     if model["feature_set"] != V2D_FEATURE_SET:
         raise V2MLError(f"unsupported V2D feature set: {model['feature_set']}")
-    if model["threshold_name"] != PRIMARY_THRESHOLD_NAME:
-        raise V2MLError("V2D model threshold_name must be threshold_f2")
+    if model["threshold_name"] not in {"threshold_f1", "threshold_f2"}:
+        raise V2MLError("V2D model threshold_name must be threshold_f1 or threshold_f2")
     if model["deployability_label"] != "reference_only":
         raise V2MLError("V2D YAMNet model must be marked reference_only")
     model.setdefault("preprocessing_profile", LEGACY_PREPROCESSING_PROFILE)
@@ -682,6 +699,7 @@ def _fit_embedding_head(
     *,
     max_iter: int,
     progress_callback: ProgressCallback | None,
+    balance_groups: bool = False,
 ) -> Any:
     _, _, classes = _require_ml_dependencies()
     labels = _labels_for_mask(bundle, train_mask)
@@ -695,12 +713,17 @@ def _fit_embedding_head(
             }
         )
     estimator = classes["LogisticRegression"](
-        class_weight="balanced",
+        class_weight=None if balance_groups else "balanced",
         max_iter=max_iter,
         random_state=RANDOM_SEED,
         solver="lbfgs",
     )
-    estimator.fit(embeddings[train_mask], labels)
+    fit_kwargs = (
+        {"sample_weight": hierarchical_sample_weights(bundle, train_mask)}
+        if balance_groups
+        else {}
+    )
+    estimator.fit(embeddings[train_mask], labels, **fit_kwargs)
     if progress_callback is not None:
         progress_callback({"event": "model_fit_complete", "model_type": V2D_MODEL_TYPE})
     return estimator
@@ -712,11 +735,14 @@ def _embedding_metrics(
     estimator: Any,
     partitions: Mapping[str, Any],
     cache_report: Mapping[str, Any],
+    *,
+    primary_threshold_name: str = PRIMARY_THRESHOLD_NAME,
 ) -> dict[str, Any]:
     val_scores = _score_estimator(estimator, embeddings[partitions["val"]])
     val_labels = _labels_for_mask(bundle, partitions["val"])
     thresholds = select_thresholds(val_labels, val_scores)
-    threshold = thresholds[PRIMARY_THRESHOLD_NAME]
+    _validate_primary_threshold_name(primary_threshold_name)
+    threshold = thresholds[primary_threshold_name]
     public_scores, inference = _score_with_timing(
         estimator,
         embeddings[partitions["public_test"]],
@@ -735,13 +761,20 @@ def _embedding_metrics(
         "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
         "source_bundle_fingerprint": bundle.bundle_fingerprint,
         "feature_count": int(embeddings.shape[1]),
-        "threshold_name": PRIMARY_THRESHOLD_NAME,
+        "threshold_name": primary_threshold_name,
         "threshold": threshold,
         "thresholds": thresholds,
-        "training": {"counts": _counts_for_mask(bundle, partitions["train"])},
+        "training": {
+            "counts": _counts_for_mask(bundle, partitions["train"]),
+            "split_version": bundle.split_version,
+            "group_parser_version": bundle.group_parser_version,
+        },
         "validation": {
             "counts": _counts_for_mask(bundle, partitions["val"]),
             "primary": _metrics(val_labels, val_scores, threshold),
+            "per_dataset": metrics_by_dataset(
+                bundle, partitions["val"], val_scores, threshold
+            ),
             "metrics_by_threshold": {
                 name: _metrics(val_labels, val_scores, value)
                 for name, value in thresholds.items()
@@ -785,8 +818,12 @@ def _embedding_metrics(
         },
         "selection": {
             "uses_professor_data": False,
-            "primary_metric": "validation.f2",
-            "primary_threshold": PRIMARY_THRESHOLD_NAME,
+            "primary_metric": (
+                "validation.f1"
+                if primary_threshold_name == "threshold_f1"
+                else "validation.f2"
+            ),
+            "primary_threshold": primary_threshold_name,
         },
         "limitations": [
             "V2D is reference_only unless full extractor deployment proof is added.",
@@ -823,6 +860,8 @@ def _model_package(
         "preprocessing_profile": metrics["preprocessing_profile"],
         "processed_sample_rate_hz": metrics["processed_sample_rate_hz"],
         "source_bundle_fingerprint": metrics["source_bundle_fingerprint"],
+        "split_version": metrics["training"].get("split_version"),
+        "group_parser_version": metrics["training"].get("group_parser_version"),
     }
 
 

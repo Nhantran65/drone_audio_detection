@@ -182,6 +182,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Deterministic seed for group split assignment.",
     )
 
+    v3_manifest_parser = subcommands.add_parser(
+        "build-v3-grouped-manifest",
+        help="Rebuild public train/val/test splits at recording-session group granularity.",
+    )
+    v3_manifest_parser.add_argument("--source-manifest", required=True, type=Path)
+    v3_manifest_parser.add_argument("--manifest-out", required=True, type=Path)
+    v3_manifest_parser.add_argument("--group-map-out", required=True, type=Path)
+    v3_manifest_parser.add_argument("--audit-out", required=True, type=Path)
+    v3_manifest_parser.add_argument("--split-seed", type=int, default=20260804)
+
+    v3_features_parser = subcommands.add_parser(
+        "repartition-v3-features",
+        help="Reuse canonical raw features, apply V3 splits, and refit the train scaler.",
+    )
+    v3_features_parser.add_argument("--source-bundle", required=True, type=Path)
+    v3_features_parser.add_argument("--grouped-manifest", required=True, type=Path)
+    v3_features_parser.add_argument("--features-out", required=True, type=Path)
+    v3_features_parser.add_argument("--scaler-out", required=True, type=Path)
+    v3_features_parser.add_argument("--audit-out", required=True, type=Path)
+
+    v3_cache_parser = subcommands.add_parser(
+        "rebind-v3-cache",
+        help="Reuse an immutable canonical cache after exact V3 row-identity checks.",
+    )
+    v3_cache_parser.add_argument("--source-bundle", required=True, type=Path)
+    v3_cache_parser.add_argument("--v3-bundle", required=True, type=Path)
+    v3_cache_parser.add_argument("--source-cache-dir", required=True, type=Path)
+    v3_cache_parser.add_argument("--cache-out-dir", required=True, type=Path)
+    v3_cache_parser.add_argument(
+        "--evaluation-only",
+        action="store_true",
+        help="Allow an evaluation bundle without public V3 split metadata.",
+    )
+
     nasa_parser = subcommands.add_parser(
         "convert-nasa-mat",
         help="Convert NASA Small UAS MATLAB audio files to derived mono WAV files.",
@@ -297,6 +331,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Output directory for V2A sweep artifacts.",
     )
+    sweep_v2_parser.add_argument(
+        "--balance-groups",
+        action="store_true",
+        help="Equalize train contribution by class, dataset, and recording group.",
+    )
+    sweep_v2_parser.add_argument(
+        "--primary-threshold",
+        choices=("threshold_f1", "threshold_f2"),
+        default="threshold_f2",
+    )
 
     mlp_parser = subcommands.add_parser(
         "train-v2-mlp",
@@ -333,6 +377,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Minimum validation F2 delta required to count as an improvement.",
+    )
+    mlp_parser.add_argument("--balance-groups", action="store_true")
+    mlp_parser.add_argument("--random-seed", type=int, default=20260619)
+    mlp_parser.add_argument(
+        "--primary-threshold",
+        choices=("threshold_f1", "threshold_f2"),
+        default="threshold_f2",
     )
 
     mlp_rescue_parser = subcommands.add_parser(
@@ -400,6 +451,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Minimum validation F2 delta required to count as an improvement.",
     )
+    cnn_parser.add_argument("--balance-groups", action="store_true")
+    cnn_parser.add_argument("--random-seed", type=int, default=20260619)
+    cnn_parser.add_argument(
+        "--primary-threshold",
+        choices=("threshold_f1", "threshold_f2"),
+        default="threshold_f2",
+    )
 
     embedding_parser = subcommands.add_parser(
         "train-v2-embedding",
@@ -455,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     embedding_parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size.")
     embedding_parser.add_argument("--epochs", type=int, default=5, help="Embedding head epochs.")
+    embedding_parser.add_argument("--balance-groups", action="store_true")
+    embedding_parser.add_argument(
+        "--primary-threshold",
+        choices=("threshold_f1", "threshold_f2"),
+        default="threshold_f2",
+    )
 
     eval_v2_parser = subcommands.add_parser(
         "eval-v2",
@@ -586,6 +650,19 @@ def build_parser() -> argparse.ArgumentParser:
     real_eval_parser.add_argument("--export-errors", type=Path)
     real_eval_parser.add_argument("--batch-size", type=int, default=512)
 
+    v3_eval_parser = subcommands.add_parser(
+        "eval-v3",
+        help="Evaluate one frozen V3 model on grouped public and professor test data.",
+    )
+    v3_eval_parser.add_argument("--model", required=True, type=Path)
+    v3_eval_parser.add_argument("--features", required=True, type=Path)
+    v3_eval_parser.add_argument("--public-audio-root", required=True, type=Path)
+    v3_eval_parser.add_argument("--professor-audio-root", required=True, type=Path)
+    v3_eval_parser.add_argument("--cache-dir", required=True, type=Path)
+    v3_eval_parser.add_argument("--metrics-out", required=True, type=Path)
+    v3_eval_parser.add_argument("--batch-size", type=int, default=512)
+    v3_eval_parser.add_argument("--bootstrap-iterations", type=int, default=1000)
+
     init_run_parser = subcommands.add_parser(
         "init-v2-16khz-run",
         help="Inventory legacy artifacts and create a fresh isolated V2 16-kHz run root.",
@@ -602,6 +679,20 @@ def build_parser() -> argparse.ArgumentParser:
     finalize_run_parser.add_argument("--public-manifest", required=True, type=Path)
     finalize_run_parser.add_argument("--professor-manifest", required=True, type=Path)
     finalize_run_parser.add_argument("--legacy-feature-bundle", required=True, type=Path)
+
+    init_v3_parser = subcommands.add_parser(
+        "init-v3-run", help="Inventory legacy artifacts and initialize an isolated V3 run."
+    )
+    init_v3_parser.add_argument("--run-root", required=True, type=Path)
+    init_v3_parser.add_argument("--legacy-root", required=True, type=Path)
+
+    finalize_v3_parser = subcommands.add_parser(
+        "finalize-v3-run", help="Verify preservation and finalize V3 comparison/provenance."
+    )
+    finalize_v3_parser.add_argument("--run-root", required=True, type=Path)
+    finalize_v3_parser.add_argument("--legacy-root", required=True, type=Path)
+    finalize_v3_parser.add_argument("--source-manifest", required=True, type=Path)
+    finalize_v3_parser.add_argument("--source-bundle", required=True, type=Path)
 
     return parser
 
@@ -696,6 +787,72 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "build-v3-grouped-manifest":
+        from drone_sound.v3_group_split import V3SplitError, build_v3_grouped_manifest
+
+        try:
+            report = build_v3_grouped_manifest(
+                args.source_manifest,
+                args.manifest_out,
+                args.group_map_out,
+                args.audit_out,
+                split_seed=args.split_seed,
+            )
+        except V3SplitError as error:
+            print(f"v3 split error: {error}", file=sys.stderr)
+            return 1
+        counts = report["counts"]
+        print(
+            "built V3 grouped manifest: "
+            f"{counts['rows']} windows, "
+            f"train={counts['splits']['train']['rows']} "
+            f"val={counts['splits']['val']['rows']} "
+            f"public_test={counts['splits']['public_test']['rows']} "
+            f"-> {args.manifest_out}"
+        )
+        return 0
+
+    if args.command == "repartition-v3-features":
+        from drone_sound.v3_features import V3FeatureError, repartition_v3_features
+
+        try:
+            report = repartition_v3_features(
+                args.source_bundle,
+                args.grouped_manifest,
+                args.features_out,
+                args.scaler_out,
+                args.audit_out,
+                progress_callback=_v3_progress_logger(),
+            )
+        except V3FeatureError as error:
+            print(f"v3 feature error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "repartitioned V3 features: "
+            f"{report['counts']['rows']} rows -> {args.features_out}"
+        )
+        return 0
+
+    if args.command == "rebind-v3-cache":
+        from drone_sound.v3_cache import V3CacheError, rebind_v3_cache
+
+        try:
+            report = rebind_v3_cache(
+                args.source_bundle,
+                args.v3_bundle,
+                args.source_cache_dir,
+                args.cache_out_dir,
+                evaluation_only=args.evaluation_only,
+            )
+        except V3CacheError as error:
+            print(f"v3 cache error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "rebound V3 cache after exact row identity check: "
+            f"shape={report['shape']} -> {args.cache_out_dir}"
+        )
+        return 0
+
     if args.command == "convert-nasa-mat":
         try:
             report = convert_nasa_mat_directory(
@@ -755,6 +912,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.model_types,
                 args.out_dir,
                 progress_callback=_v2_ml_progress_logger(),
+                balance_groups=args.balance_groups,
+                primary_threshold_name=args.primary_threshold,
             )
         except V2MLError as error:
             print(f"v2 ml error: {error}", file=sys.stderr)
@@ -779,6 +938,9 @@ def main(argv: list[str] | None = None) -> int:
                 batch_size=args.batch_size,
                 patience=args.patience,
                 min_delta=args.min_delta,
+                balance_groups=args.balance_groups,
+                random_seed=args.random_seed,
+                primary_threshold_name=args.primary_threshold,
             )
         except V2MLError as error:
             print(f"v2 ml error: {error}", file=sys.stderr)
@@ -835,6 +997,9 @@ def main(argv: list[str] | None = None) -> int:
                 batch_size=args.batch_size,
                 patience=args.patience,
                 min_delta=args.min_delta,
+                balance_groups=args.balance_groups,
+                random_seed=args.random_seed,
+                primary_threshold_name=args.primary_threshold,
             )
         except V2MLError as error:
             print(f"v2 ml error: {error}", file=sys.stderr)
@@ -864,6 +1029,8 @@ def main(argv: list[str] | None = None) -> int:
                 progress_callback=_v2_ml_progress_logger(),
                 batch_size=args.batch_size,
                 epochs=args.epochs,
+                balance_groups=args.balance_groups,
+                primary_threshold_name=args.primary_threshold,
             )
         except V2MLError as error:
             print(f"v2 ml error: {error}", file=sys.stderr)
@@ -1042,6 +1209,35 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "eval-v3":
+        from drone_sound.v2_ml import V2MLError
+        from drone_sound.v3_evaluation import evaluate_v3_frozen_model
+
+        try:
+            report = evaluate_v3_frozen_model(
+                args.model,
+                args.features,
+                args.public_audio_root,
+                args.professor_audio_root,
+                args.cache_dir,
+                args.metrics_out,
+                progress_callback=_v2_ml_progress_logger(),
+                batch_size=args.batch_size,
+                bootstrap_iterations=args.bootstrap_iterations,
+            )
+        except V2MLError as error:
+            print(f"v3 evaluation error: {error}", file=sys.stderr)
+            return 1
+        metrics = report["public_test"]["metrics"]
+        print(
+            "evaluated frozen V3 model: "
+            f"model={report['model_type']} f1={_format_metric(metrics['f1'])} "
+            f"f2={_format_metric(metrics['f2'])} "
+            f"fpr={_format_metric(metrics['false_positive_rate'])} "
+            f"-> {args.metrics_out}"
+        )
+        return 0
+
     if args.command == "init-v2-16khz-run":
         from drone_sound.v2_run import V2RunError, initialize_v2_run
 
@@ -1058,6 +1254,46 @@ def main(argv: list[str] | None = None) -> int:
             "initialized isolated v2 16-kHz run: "
             f"legacy_files={report['legacy_artifacts']['before']['file_count']} "
             f"-> {args.run_root}"
+        )
+        return 0
+
+    if args.command == "init-v3-run":
+        from drone_sound.v3_run import V3RunError, initialize_v3_run
+
+        try:
+            report = initialize_v3_run(
+                args.run_root,
+                args.legacy_root,
+                progress_callback=_v2_run_progress_logger(),
+            )
+        except V3RunError as error:
+            print(f"v3 run error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "initialized isolated V3 run: "
+            f"legacy_files={report['legacy_artifacts']['before']['file_count']} "
+            f"-> {args.run_root}"
+        )
+        return 0
+
+    if args.command == "finalize-v3-run":
+        from drone_sound.v3_run import V3RunError, finalize_v3_run
+
+        try:
+            report = finalize_v3_run(
+                args.run_root,
+                args.legacy_root,
+                args.source_manifest,
+                args.source_bundle,
+                progress_callback=_v2_run_progress_logger(),
+            )
+        except V3RunError as error:
+            print(f"v3 run error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "finalized V3 run: "
+            f"selected={report['selection']['model_type']} "
+            f"legacy_unchanged={report['legacy_artifacts']['unchanged']}"
         )
         return 0
 
@@ -1224,6 +1460,7 @@ def _v2_ml_progress_logger() -> Callable[[dict[str, Any]], None]:
                 "v2 ml progress: "
                 f"epoch complete model={model_type} epoch={event['epoch']}/{event['epochs']} "
                 f"loss={float(event['loss']):.6f} "
+                f"validation_f1={_format_metric(event.get('validation_f1'))} "
                 f"validation_f2={_format_metric(event.get('validation_f2'))} "
                 f"validation_fpr={_format_metric(event.get('validation_fpr'))} "
                 f"elapsed={elapsed}{improved}",
@@ -1341,6 +1578,26 @@ def _v2_feature_progress_logger() -> Callable[[dict[str, Any]], None]:
                 file=sys.stderr,
                 flush=True,
             )
+
+    return log
+
+
+def _v3_progress_logger() -> Callable[[dict[str, Any]], None]:
+    started_at = time.monotonic()
+
+    def log(event: dict[str, Any]) -> None:
+        elapsed = _format_duration(time.monotonic() - started_at)
+        name = str(event.get("event", "v3_progress"))
+        details = " ".join(
+            f"{key}={value}"
+            for key, value in event.items()
+            if key != "event" and key not in {"bundle_fingerprint"}
+        )
+        print(
+            f"v3 progress: phase={name} {details} elapsed={elapsed}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return log
 

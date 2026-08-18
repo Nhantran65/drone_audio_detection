@@ -281,3 +281,12 @@ python -m drone_sound.cli eval-v1 \
 Professor metrics are recall-oriented only because the professor data is
 positive-only or near-positive-only. Combined metrics are supplementary and do
 not replace the public test benchmark.
+
+## V3 Group-aware 16 kHz Run
+
+V3 keeps the canonical 16 kHz feature contract but assigns whole correlated
+recording-session groups to train, validation, and public test. Run artifacts
+are isolated under `artifacts/v3_group_split_16khz/`; existing V1/V2 artifacts
+are inventoried before and after the run. The main commands are
+`init-v3-run`, `build-v3-grouped-manifest`, `repartition-v3-features`,
+`rebind-v3-cache`, `eval-v3`, and `finalize-v3-run`.

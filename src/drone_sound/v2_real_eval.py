@@ -10,7 +10,6 @@ from typing import Any, Callable, Mapping, Sequence
 
 from drone_sound.training import NEGATIVE_LABEL, POSITIVE_LABEL, _metrics
 from drone_sound.v2_ml import (
-    PRIMARY_THRESHOLD_NAME,
     V2FeatureBundle,
     V2MLError,
     _require_model_compatible_with_bundle,
@@ -55,21 +54,22 @@ def evaluate_real_v2(
         )
 
     if model_file.suffix.lower() in {".pt", ".pth"}:
-        model_type, track, threshold, scores = _score_cnn(
+        model_type, track, threshold_name, thresholds, scores = _score_cnn(
             model_file, bundle, audio_root, cache_dir, progress_callback, batch_size
         )
     else:
         raw = _load_joblib(model_file)
         if raw.get("track") == "v2d" or raw.get("model_type") == "yamnet_head":
-            model_type, track, threshold, scores = _score_embedding(
+            model_type, track, threshold_name, thresholds, scores = _score_embedding(
                 model_file, bundle, audio_root, cache_dir, progress_callback, batch_size
             )
         else:
-            model_type, track, threshold, scores = _score_engineered(
+            model_type, track, threshold_name, thresholds, scores = _score_engineered(
                 model_file, bundle, progress_callback
             )
 
     labels = list(bundle.labels)
+    threshold = float(thresholds[threshold_name])
     metrics = _metrics(labels, scores, threshold)
     report = {
         "schema_version": "v2_real_only_evaluation_v1",
@@ -83,14 +83,20 @@ def evaluate_real_v2(
         "bundle_fingerprint": bundle.bundle_fingerprint,
         "preprocessing_profile": bundle.preprocessing_profile,
         "processed_sample_rate_hz": bundle.processed_sample_rate_hz,
-        "threshold_name": PRIMARY_THRESHOLD_NAME,
+        "threshold_name": threshold_name,
         "threshold": threshold,
+        "thresholds": thresholds,
         "counts": {
             POSITIVE_LABEL: labels.count(POSITIVE_LABEL),
             NEGATIVE_LABEL: labels.count(NEGATIVE_LABEL),
             "recordings": len(set(bundle.original_files)),
         },
         "metrics": metrics,
+        "metrics_by_threshold": {
+            name: _metrics(labels, scores, value)
+            for name, value in thresholds.items()
+            if name in {"threshold_f1", "threshold_f2"}
+        },
         "per_environment": _per_environment(bundle, scores, threshold),
         "per_recording_fpr": _per_recording_fpr(bundle, scores, threshold),
         "limitations": [
@@ -120,14 +126,21 @@ def _score_engineered(
     model_path: Path,
     bundle: V2FeatureBundle,
     progress_callback: ProgressCallback | None,
-) -> tuple[str, str, float, list[float]]:
+) -> tuple[str, str, str, dict[str, float], list[float]]:
     model = load_v2_model(model_path)
     _require_model_compatible_with_bundle(model, bundle)
     _require_frozen_threshold(model)
     if progress_callback is not None:
         progress_callback({"event": "real_eval_score", "model_type": model["model_type"]})
     scores = _score_estimator(model["estimator"], bundle.features)
-    return str(model["model_type"]), str(model["track"]), float(model["threshold"]), scores
+    thresholds = {name: float(value) for name, value in model["thresholds"].items()}
+    return (
+        str(model["model_type"]),
+        str(model["track"]),
+        str(model["threshold_name"]),
+        thresholds,
+        scores,
+    )
 
 
 def _score_cnn(
@@ -137,7 +150,7 @@ def _score_cnn(
     cache_dir: str | Path,
     progress_callback: ProgressCallback | None,
     batch_size: int,
-) -> tuple[str, str, float, list[float]]:
+) -> tuple[str, str, str, dict[str, float], list[float]]:
     from drone_sound.v2_torch import (
         LOGMEL_BINS,
         LOGMEL_FRAMES,
@@ -170,7 +183,8 @@ def _score_cnn(
         model_type="tiny_cnn",
         phase="real_only",
     )
-    return "tiny_cnn", "v2c", float(checkpoint["threshold"]), scores
+    thresholds = {name: float(value) for name, value in checkpoint["thresholds"].items()}
+    return "tiny_cnn", "v2c", str(checkpoint["threshold_name"]), thresholds, scores
 
 
 def _score_embedding(
@@ -180,7 +194,7 @@ def _score_embedding(
     cache_dir: str | Path,
     progress_callback: ProgressCallback | None,
     batch_size: int,
-) -> tuple[str, str, float, list[float]]:
+) -> tuple[str, str, str, dict[str, float], list[float]]:
     from drone_sound.v2_embedding import (
         _require_embedding_model_compatible,
         _yamnet_embedding_cache,
@@ -199,7 +213,8 @@ def _score_embedding(
         progress_every=batch_size,
     )
     scores = _score_estimator(model["estimator"], embeddings)
-    return "yamnet_head", "v2d", float(model["threshold"]), scores
+    thresholds = {name: float(value) for name, value in model["thresholds"].items()}
+    return "yamnet_head", "v2d", str(model["threshold_name"]), thresholds, scores
 
 
 def _require_real_only_bundle(bundle: V2FeatureBundle) -> None:
@@ -215,10 +230,12 @@ def _require_real_only_bundle(bundle: V2FeatureBundle) -> None:
 
 
 def _require_frozen_threshold(model: Mapping[str, Any]) -> None:
-    if model.get("threshold_name") != PRIMARY_THRESHOLD_NAME:
-        raise V2MLError("real-only evaluation requires frozen threshold_f2")
+    if model.get("threshold_name") not in {"threshold_f1", "threshold_f2"}:
+        raise V2MLError("real-only evaluation requires a frozen F1 or F2 threshold")
     if "threshold" not in model:
         raise V2MLError("model does not contain a frozen threshold")
+    if model.get("threshold_name") not in model.get("thresholds", {}):
+        raise V2MLError("model threshold_name is missing from frozen thresholds")
 
 
 def _per_environment(

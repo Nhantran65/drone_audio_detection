@@ -96,6 +96,11 @@ Subtypes:
 No `original_file` may appear in more than one split. Window-level random split
 is not allowed.
 
+V3 strengthens this rule: no correlated recording-session `group_id` may appear
+in more than one of train, validation, or public test. Group derivation is
+dataset-specific and versioned; private and professor recordings are excluded
+from public split construction.
+
 ## Location Privacy
 
 Professor data audit reports must redact exact GPS coordinates by default. The
