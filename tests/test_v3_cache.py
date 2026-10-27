@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")
 
 from drone_sound.v3_cache import V3CacheError, rebind_v3_cache
 from drone_sound.v3_group_split import V3_SPLIT_VERSION

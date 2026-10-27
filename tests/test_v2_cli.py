@@ -301,6 +301,7 @@ def test_v2_mlp_cli_reports_missing_features(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    pytest.importorskip("numpy")
     exit_code = main(
         [
             "train-v2-mlp",

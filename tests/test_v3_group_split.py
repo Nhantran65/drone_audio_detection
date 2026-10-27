@@ -4,7 +4,9 @@ import csv
 import json
 from pathlib import Path
 
-import numpy as np
+import pytest
+
+np = pytest.importorskip("numpy")
 
 from drone_sound.audio_preprocessing import CANONICAL_PREPROCESSING_PROFILE
 from drone_sound.constants import REQUIRED_MANIFEST_FIELDS
